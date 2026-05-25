@@ -40,3 +40,4 @@ indexer/data/contacts/
 *.log
 tmp/
 .tmp/
+KICKOFF_PROMPT.md
