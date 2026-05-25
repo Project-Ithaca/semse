@@ -74,6 +74,22 @@ def _init_metadata_db(path: Path) -> sqlite3.Connection:
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_images_date ON images(date_iso)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS contact_personas (
+            name TEXT PRIMARY KEY,
+            style_summary TEXT,
+            avg_msg_length REAL,
+            emoji_frequency REAL,
+            response_style TEXT,
+            top_topics TEXT,
+            first_message_iso TEXT,
+            last_message_iso TEXT,
+            total_messages INTEGER,
+            sample_hash TEXT
+        )
+        """
+    )
     return conn
 
 
@@ -392,6 +408,11 @@ def _build_contact_summaries() -> None:
     build_cs(META_DB_PATH, INDEX_PATH, ID_MAP_PATH)
 
 
+def _build_contact_personas() -> None:
+    from persona_builder import build as build_personas
+    build_personas(META_DB_PATH)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -413,10 +434,18 @@ def main() -> None:
              "messages newer than the latest chunk per source. Falls back to a full "
              "build if no existing index is found.",
     )
+    parser.add_argument(
+        "--personas",
+        action="store_true",
+        help="Build/refresh per-contact personas (style, topics). Runs after --summaries "
+             "if both flags are present.",
+    )
     args = parser.parse_args()
     build(set(args.sources), update=args.update)
     if args.summaries:
         _build_contact_summaries()
+    if args.personas:
+        _build_contact_personas()
 
 
 if __name__ == "__main__":
