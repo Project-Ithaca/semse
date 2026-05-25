@@ -81,8 +81,20 @@ Output format:
 - 1–2 sentences. No preamble. No "Based on the messages…". No apologies. No restating the question.
 - To stay silent: return a literal empty string. Don't write "no answer" or anything similar."""
 
+COMPARE_FOCUSED_PROMPT = """You are comparing what two or more people said about a topic, based on excerpts of THEIR OWN messages (the user's words are not shown).
+
+In 1-2 sentences:
+- Note where they agree and where they disagree on the topic
+- Use the speaker label that prefixes each line; only attribute what's prefixed with that person's name
+- If one of them barely spoke on the topic, say so plainly: "{name} didn't say much about this."
+
+No preamble. No quotation marks unless the quoted phrase is verbatim in the messages."""
+
 RRF_K = 60  # standard reciprocal rank fusion constant
 FUSE_FETCH = 24  # how many candidates each retriever pulls before fusion
+
+# Strip punctuation for pattern matching in _classify_query_type.
+_STRIP_PUNC = re.compile(r"[^\w\s]")
 
 _QUERY_TOKEN_RE = re.compile(r"[A-Za-z0-9]{2,}")
 _NAME_NORM_RE = re.compile(r"[^a-z0-9 ]+")
@@ -273,6 +285,285 @@ class SearchEngine:
                 "last": (r["last_message_iso"] or "")[:10],
             }
         return out
+
+    def _load_persona(self, name: str) -> dict | None:
+        """Load a contact's persona row from contact_personas, or None if missing."""
+        with self._open_db() as conn:
+            try:
+                row = conn.execute(
+                    "SELECT * FROM contact_personas WHERE name=?", (name,)
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return None
+        return dict(row) if row else None
+
+    def _recent_chunks_for_contacts(
+        self,
+        contact_filter: set[str],
+        limit: int,
+        before_iso: str | None = None,
+    ) -> list[SourceResult]:
+        """Fetch the most recent chunks where any target contact appears.
+        Optionally filtered to chunks before `before_iso`."""
+        like_args = [f'%{json.dumps(n)[1:-1]}%' for n in contact_filter]
+        conditions = " OR ".join("contact_names LIKE ?" for _ in like_args)
+        extra = ""
+        if before_iso:
+            extra = f" AND date_end < '{before_iso}'"
+        with self._open_db() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM chunks WHERE ({conditions}){extra} "
+                f"ORDER BY date_end DESC LIMIT ?",
+                like_args + [limit],
+            ).fetchall()
+        out: list[SourceResult] = []
+        for r in rows:
+            messages = [ChunkMessage(**m) for m in json.loads(r["messages"] or "[]")]
+            out.append(
+                SourceResult(
+                    source=r["source"],
+                    contact_names=json.loads(r["contact_names"]),
+                    date_start=r["date_start"],
+                    date_end=r["date_end"],
+                    score=0.5,
+                    messages=messages,
+                    subject=r["subject"],
+                    chat_title=r["chat_title"],
+                    snippet=(r["text"] or "")[:280] if not messages else "",
+                )
+            )
+        return out
+
+    async def _synthesize_style(
+        self,
+        contact_filter: set[str],
+        query: str,
+        top_k: int,
+    ) -> tuple[str, list[SourceResult]] | None:
+        """Return (answer, sources) for a style query, or None to fall through."""
+        personas = [self._load_persona(n) for n in contact_filter]
+        personas = [p for p in personas if p]
+        if not personas:
+            return None
+
+        parts: list[str] = []
+        for p in personas:
+            topics_raw = json.loads(p.get("top_topics") or "[]")
+            top4 = " · ".join(t["topic"] for t in topics_raw[:4])
+            style_sum = p.get("style_summary") or f"{p['name']} communicates concisely."
+            parts.append(f"{style_sum}\n\nThey mainly talk about: {top4}.")
+        answer = "\n\n".join(parts)
+
+        # Fetch 3 recent chunks as supporting sources.
+        sources = await asyncio.to_thread(
+            self._recent_chunks_for_contacts, contact_filter, min(3, top_k)
+        )
+        return answer, sources
+
+    async def _synthesize_affinity(
+        self,
+        contact_filter: set[str],
+        query: str,
+        top_k: int,
+    ) -> tuple[str, list[SourceResult]] | None:
+        """Return (answer, sources) for an affinity query, or None to fall through."""
+        personas = [self._load_persona(n) for n in contact_filter]
+        personas = [p for p in personas if p]
+        if not personas:
+            return None
+
+        all_sources: list[SourceResult] = []
+        answer_parts: list[str] = []
+        for p in personas:
+            name = p["name"]
+            topics_raw = json.loads(p.get("top_topics") or "[]")
+            if not topics_raw:
+                continue
+            topic_list = ", ".join(
+                f"{t['topic']} ({round(t['score'] * 100):.0f}%)"
+                for t in topics_raw[:6]
+            )
+            prompt = (
+                f"Rewrite this as one natural sentence about what someone talks about most:\n"
+                f"{name} top topics: {topic_list}\n\nOutput: just the sentence, no preamble."
+            )
+            try:
+                resp = await self._openai.chat.completions.create(
+                    model=OPENAI_MODEL,
+                    temperature=0.0,
+                    max_tokens=80,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                answer_parts.append((resp.choices[0].message.content or "").strip())
+            except Exception:
+                answer_parts.append(f"{name} mainly discusses: {topic_list}.")
+
+            # One recent chunk per top topic as sources (up to 4).
+            all_sources.extend(
+                await asyncio.to_thread(
+                    self._recent_chunks_for_contacts, {name}, min(4, top_k)
+                )
+            )
+
+        if not answer_parts:
+            return None
+        return "\n\n".join(answer_parts), all_sources[:top_k]
+
+    async def _synthesize_temporal(
+        self,
+        contact_filter: set[str],
+        query: str,
+        top_k: int,
+    ) -> tuple[str, list[SourceResult]] | None:
+        """Return (answer, sources) for a temporal/change query, or None to fall through."""
+        import datetime as _dt
+        from sklearn.cluster import KMeans
+
+        cutoff = (_dt.datetime.utcnow() - _dt.timedelta(days=30)).isoformat()
+
+        # Pull recent and older chunks separately.
+        recent_chunks = await asyncio.to_thread(
+            self._recent_chunks_for_contacts, contact_filter, 50
+        )
+        recent_chunks = [c for c in recent_chunks if (c.date_end or "") >= cutoff]
+        older_chunks = await asyncio.to_thread(
+            self._recent_chunks_for_contacts, contact_filter, 50, before_iso=cutoff
+        )
+
+        def _top_topics(chunks: list[SourceResult], k: int = 3) -> list[str]:
+            """Extract top topic labels from chunks via K-means on text embeds."""
+            texts = [c.snippet or (c.messages[0].text if c.messages else "") for c in chunks]
+            texts = [t for t in texts if t and len(t) > 10]
+            if len(texts) < k:
+                return texts[:k]
+            vecs = self.embedder.embed_batch(texts).astype("float32")
+            n_clust = min(k, len(texts))
+            km = KMeans(n_clusters=n_clust, n_init=4, random_state=42)
+            labels = km.fit_predict(vecs)
+            rep_texts: list[str] = []
+            for cid in range(n_clust):
+                members = np.where(labels == cid)[0].tolist()
+                if not members:
+                    continue
+                centroid = km.cluster_centers_[cid]
+                sims = vecs[members] @ centroid / (np.linalg.norm(centroid) or 1.0)
+                best = texts[members[int(np.argmax(sims))]][:120]
+                rep_texts.append(best)
+            return rep_texts
+
+        recent_topics = await asyncio.to_thread(_top_topics, recent_chunks)
+        older_topics = await asyncio.to_thread(_top_topics, older_chunks)
+
+        if not recent_topics and not older_topics:
+            return None
+
+        recent_str = ", ".join(f'"{t}"' for t in recent_topics) or "nothing recent"
+        older_str = ", ".join(f'"{t}"' for t in older_topics) or "nothing earlier"
+        names = ", ".join(sorted(contact_filter))
+        prompt = (
+            f"Recent topics from {names}: [{recent_str}]. "
+            f"Earlier topics: [{older_str}]. "
+            f"In one sentence, describe the shift in what this person talks about. "
+            f"If there's no meaningful shift, say so plainly."
+        )
+        try:
+            resp = await self._openai.chat.completions.create(
+                model=OPENAI_MODEL,
+                temperature=0.0,
+                max_tokens=100,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            answer = (resp.choices[0].message.content or "").strip()
+        except Exception:
+            answer = ""
+        if not answer or _looks_like_non_answer(answer):
+            return None
+
+        # Interleave 3 recent + 3 older as sources.
+        sources: list[SourceResult] = []
+        for i in range(max(len(recent_chunks[:3]), len(older_chunks[:3]))):
+            if i < len(recent_chunks[:3]):
+                sources.append(recent_chunks[i])
+            if i < len(older_chunks[:3]):
+                sources.append(older_chunks[i])
+        return answer, sources[:top_k]
+
+    async def _synthesize_compare(
+        self,
+        query: str,
+        contact_filter: set[str],
+        embed_query: str,
+        top_k: int,
+        t0: float,
+    ) -> SearchResponse | None:
+        """Compare mode: fetch per-contact chunks, interleave, send to LLM."""
+        # Fetch per-contact chunks via the contact-similarity reranker path.
+        per_contact: dict[str, list[SourceResult]] = {}
+        for name in contact_filter:
+            chunks = await asyncio.to_thread(
+                self._recent_chunks_for_contacts, {name}, top_k * 2
+            )
+            # Re-rank by similarity to embed_query using contact's own lines.
+            if chunks:
+                chunks = await asyncio.to_thread(
+                    self._rerank_by_contact_similarity, chunks, {name}, embed_query, top_k
+                )
+            per_contact[name] = chunks
+
+        if not any(per_contact.values()):
+            return None
+
+        # Interleave: [X1, Y1, X2, Y2, …]
+        interleaved: list[SourceResult] = []
+        names_sorted = sorted(per_contact.keys())
+        max_len = max(len(v) for v in per_contact.values())
+        for i in range(max_len):
+            for n in names_sorted:
+                if i < len(per_contact[n]):
+                    interleaved.append(per_contact[n][i])
+        interleaved = interleaved[:top_k]
+
+        # Build context — only contact's own lines, prefixed by speaker.
+        blocks: list[str] = []
+        for s in interleaved:
+            if not s.messages:
+                continue
+            contact_lines = _filter_for_target_contacts(s.messages, contact_filter)
+            if not contact_lines:
+                continue
+            date = (s.date_start or "")[:10]
+            header = f"[{_label(s.source)} · {date}]"
+            body = "\n".join(f"{m.sender}: {m.text}" for m in contact_lines)
+            blocks.append(f"{header}\n{body}")
+        if not blocks:
+            return None
+
+        context = "\n\n".join(blocks)
+        try:
+            resp = await self._openai.chat.completions.create(
+                model=OPENAI_MODEL,
+                temperature=0.0,
+                max_tokens=200,
+                messages=[
+                    {"role": "system", "content": COMPARE_FOCUSED_PROMPT},
+                    {"role": "user", "content": f"Query: {query}\n\n{context}"},
+                ],
+            )
+            answer = (resp.choices[0].message.content or "").strip()
+        except Exception:
+            answer = ""
+        if not answer or _looks_like_non_answer(answer):
+            return None
+        ok, bad = _validate_no_invented_quotes(answer, context)
+        if not ok:
+            answer = _strip_invented_quote_marks(answer, context)
+            if not answer.strip(" .,;:!?\"'""''()[]"):
+                return None
+        return SearchResponse(
+            answer=answer,
+            sources=interleaved,
+            query_ms=int((time.perf_counter() - t0) * 1000),
+        )
 
     def _open_db(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path)
@@ -531,6 +822,43 @@ class SearchEngine:
                     f"[search] fallback contact extraction added: {sorted(fallback)}",
                     file=sys.stderr,
                 )
+        # Task 3: Cross-contact comparison — two+ contacts + "both"/"vs"/"and"/"compare".
+        if (
+            contact_filter is not None
+            and len(contact_filter) >= 2
+            and re.search(r"\b(both|and|vs|versus|compare)\b", req.query, re.I)
+        ):
+            result = await self._synthesize_compare(
+                req.query, contact_filter, embed_query, req.top_k, t0
+            )
+            if result is not None:
+                return result
+
+        # Early-return paths for persona-based query types (style/affinity/temporal).
+        # These bypass the full retrieval pipeline when we have richer per-contact
+        # data than what FAISS/FTS can surface.
+        # Prefer the on-device hint from QueryRouter when available (non-default),
+        # fall back to keyword classifier. This avoids an extra round-trip cost.
+        if intent and intent.query_type and intent.query_type != "standard":
+            query_type = intent.query_type
+        else:
+            query_type = _classify_query_type(req.query, has_contact=bool(contact_filter))
+        if query_type in ("style", "affinity", "temporal") and contact_filter:
+            handler = {
+                "style": self._synthesize_style,
+                "affinity": self._synthesize_affinity,
+                "temporal": self._synthesize_temporal,
+            }[query_type]
+            result = await handler(contact_filter, req.query, req.top_k)
+            if result is not None:
+                answer, sources = result
+                return SearchResponse(
+                    answer=answer,
+                    sources=sources,
+                    query_ms=int((time.perf_counter() - t0) * 1000),
+                )
+            # result is None → persona data not available, fall through to standard pipeline.
+
         # If the user explicitly asked for an image, treat image as the only
         # relevant source — text excerpts about a photo aren't what they want.
         if intent.must_have_attachment:
@@ -858,6 +1186,50 @@ def _looks_like_question(query: str) -> bool:
     if first in _QUESTION_LEAD_WORDS or bare in _QUESTION_LEAD_WORDS:
         return True
     return False
+
+
+def _classify_query_type(query: str, has_contact: bool) -> str:
+    """Returns 'style' | 'affinity' | 'temporal' | 'standard'.
+
+    Fast keyword matching only. No LLM. Runs before the search pipeline.
+    All patterns require has_contact=True because persona data is per-contact.
+    """
+    if not has_contact:
+        return "standard"
+    q = _STRIP_PUNC.sub(" ", query).lower()
+
+    # Style: how does this person communicate / write / talk?
+    if ("how does" in q or "how do" in q) and any(
+        w in q for w in ("talk", "write", "communicate")
+    ):
+        return "style"
+    if "like to talk to" in q or "like to text" in q:
+        return "style"
+    # "what's X like" / "what is X like" at end of query
+    if re.search(r"what(?:'s| is)\s+\w[\w\s]+\blike\b\s*$", q):
+        return "style"
+
+    # Affinity: what topics / interests / things they care about
+    if "care about" in q or "cares about" in q:
+        return "affinity"
+    if "what topics" in q:
+        return "affinity"
+    if ("what is" in q or "what does" in q) and " into " in q:
+        return "affinity"
+    if ("what does" in q or "what do" in q) and "talk about" in q:
+        return "affinity"
+
+    # Temporal: how someone has changed over time
+    if "been thinking" in q and "recent" in q:
+        return "temporal"
+    if ("how has" in q or "how have" in q) and "changed" in q:
+        return "temporal"
+    if "used to talk" in q:
+        return "temporal"
+    if "different now" in q:
+        return "temporal"
+
+    return "standard"
 
 
 _NON_ANSWER_PATTERNS = (

@@ -19,6 +19,9 @@ struct QueryIntent: Codable, Sendable {
     @Guide(description: "True only when the query explicitly asks for an image, photo, picture, screenshot, or attachment. False for general searches.")
     var mustHaveAttachment: Bool
 
+    @Guide(description: "Query intent type for routing: 'style' when asking HOW a person communicates (how does X talk/write/communicate, what is X like to talk to). 'affinity' when asking what topics a person cares about (what does X care about, what is X into, what topics does X talk about). 'temporal' when asking how a person has changed over time (how has X changed, what did X used to talk about, how is X different now). Default is 'standard' for everything else.")
+    var queryType: String
+
     @Generable
     enum SourceType: String, Codable, Sendable {
         case imessage
@@ -33,19 +36,24 @@ struct QueryIntentWire: Encodable {
     let sources: [String]
     let contacts: [String]
     let must_have_attachment: Bool
+    let query_type: String
 
     init(_ intent: QueryIntent) {
         self.topic = intent.topic.trimmingCharacters(in: .whitespacesAndNewlines)
         self.sources = intent.sources.map(\.rawValue)
         self.contacts = intent.contacts
         self.must_have_attachment = intent.mustHaveAttachment
+        // Normalize: accept only known values, default to "standard".
+        let known: Set<String> = ["style", "affinity", "temporal", "standard"]
+        self.query_type = known.contains(intent.queryType) ? intent.queryType : "standard"
     }
 
-    init(topic: String, sources: [String], contacts: [String], must_have_attachment: Bool) {
+    init(topic: String, sources: [String], contacts: [String], must_have_attachment: Bool, query_type: String = "standard") {
         self.topic = topic
         self.sources = sources
         self.contacts = contacts
         self.must_have_attachment = must_have_attachment
+        self.query_type = query_type
     }
 
     /// Passthrough used when the on-device model is unavailable or fails.
@@ -55,7 +63,8 @@ struct QueryIntentWire: Encodable {
             topic: query.trimmingCharacters(in: .whitespacesAndNewlines),
             sources: [],
             contacts: [],
-            must_have_attachment: false
+            must_have_attachment: false,
+            query_type: "standard"
         )
     }
 }
@@ -72,14 +81,18 @@ Rules:
 - sources: ["mail"] for email/mail/gmail; ["imessage"] for text/texts/message/messages/iMessage; ["image"] for photo/picture/pic/image/screenshot/gif. Empty if not specified.
 - contacts: PEOPLE only. Never companies/brands/products/places (lockheed, amazon, google, openai, claude, chatgpt are NOT contacts). Lowercase first names fine.
 - mustHaveAttachment: true iff query contains photo/picture/pic/image/screenshot/gif.
+- queryType: when the query is asking about HOW a person communicates (how does X talk, how does X write, what is X like to talk to) → "style". When asking what topics a person cares about (what does X care about, what is X into, what topics does X talk about) → "affinity". When asking how a person has changed over time (how has X changed, what did X used to talk about, how is X different now, what has X been thinking about recently) → "temporal". Default → "standard".
 
 Examples:
-"picture of white car" → topic="white car", sources=[image], mustHaveAttachment=true
-"email about calculus" → topic="calculus", sources=[mail]
-"does alarm prefer claude or chatgpt?" → topic="prefer claude or chatgpt", contacts=["alarm"]
-"what did alex say about the trip" → topic="the trip", contacts=["alex"]
-"who did I meet recently?" → topic="who did I meet recently"
-"offer from lockheed" → topic="offer from lockheed", sources=[mail], contacts=[] (lockheed is a company)
+"picture of white car" → topic="white car", sources=[image], mustHaveAttachment=true, queryType="standard"
+"email about calculus" → topic="calculus", sources=[mail], queryType="standard"
+"does alarm prefer claude or chatgpt?" → topic="prefer claude or chatgpt", contacts=["alarm"], queryType="standard"
+"what did alex say about the trip" → topic="the trip", contacts=["alex"], queryType="standard"
+"who did I meet recently?" → topic="who did I meet recently", queryType="standard"
+"offer from lockheed" → topic="offer from lockheed", sources=[mail], contacts=[] (lockheed is a company), queryType="standard"
+"how does sarah talk" → topic="how sarah communicates", contacts=["sarah"], queryType="style"
+"what does jerry care about" → topic="jerry's interests", contacts=["jerry"], queryType="affinity"
+"how has alex changed recently" → topic="alex change over time", contacts=["alex"], queryType="temporal"
 """
 
 /// Parses raw queries into QueryIntent using Apple's on-device Foundation Model.
@@ -138,7 +151,7 @@ actor QueryRouter {
                 logRouter(
                     "parsed: \"\(trimmed)\" → topic=\"\(safe.topic)\" " +
                     "sources=\(safe.sources) contacts=\(safe.contacts) " +
-                    "attachment=\(safe.must_have_attachment)"
+                    "attachment=\(safe.must_have_attachment) queryType=\(safe.query_type)"
                 )
                 return safe
             } catch {

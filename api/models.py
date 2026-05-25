@@ -19,6 +19,7 @@ class QueryIntent(BaseModel):
     sources: list[str] = []
     contacts: list[str] = []
     must_have_attachment: bool = False
+    query_type: str = "standard"  # "style" | "affinity" | "temporal" | "standard"
 
 
 class SearchRequest(BaseModel):
