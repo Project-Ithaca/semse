@@ -86,7 +86,7 @@ def _persist_chunks(conn: sqlite3.Connection, chunks: list[Chunk]) -> None:
         (
             c.chunk_id,
             c.source,
-            json.dumps(c.contact_names),
+            json.dumps(c.contact_names, ensure_ascii=False),
             c.date_start,
             c.date_end,
             c.text,

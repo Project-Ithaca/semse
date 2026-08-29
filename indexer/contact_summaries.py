@@ -35,7 +35,7 @@ import numpy as np
 from sklearn.cluster import KMeans
 
 from contacts import Contact, ContactResolver
-from persona_builder import LLM_MODEL, check_llm_available, escape_like, make_llm_client
+from persona_builder import check_llm_available, escape_like, llm_model, make_llm_client
 
 MAX_CLUSTERS = 8
 MIN_CHUNKS_FOR_CLUSTERING = 6      # below this, just sample a few messages directly
@@ -233,7 +233,7 @@ def build(metadata_db: Path, index_path: Path, id_map_path: Path) -> int:
         sample_block = "\n\n".join(f"• {s}" for s in samples)
         try:
             resp = client.chat.completions.create(
-                model=LLM_MODEL,
+                model=llm_model(),
                 temperature=0.0,
                 max_tokens=80,
                 messages=[

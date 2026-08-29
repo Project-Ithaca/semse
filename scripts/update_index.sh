@@ -4,10 +4,8 @@
 #   0 2 * * * /full/path/to/semse/scripts/update_index.sh
 set -euo pipefail
 cd "$(cd "$(dirname "$0")/.." && pwd)"
-set -a
-[ -f indexer/.env ] && source indexer/.env
-[ -f api/.env ] && source api/.env
-set +a
+# No shell-level .env sourcing: build_index.py loads api/.env and indexer/.env
+# itself via python-dotenv, and `source` would execute arbitrary file content.
 mkdir -p indexer/data
 {
   echo "=== update_index $(date '+%Y-%m-%d %H:%M:%S') ==="

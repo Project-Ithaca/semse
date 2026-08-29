@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 
 ENV_PATH = Path(__file__).parent / ".env"
 if ENV_PATH.exists():
@@ -44,6 +44,14 @@ def _engine_unavailable_reason() -> str:
     return engine_error or "Search engine not initialized"
 
 
+def _reject_browser(request: Request) -> None:
+    # Browsers stamp Sec-Fetch-Site on every request (including <img> loads,
+    # which CORS does not gate); the native URLSession client never does.
+    # Blocks web pages from enumerating /attachment/{id} image bytes.
+    if request.headers.get("sec-fetch-site"):
+        raise HTTPException(403, "browser access not allowed")
+
+
 @app.get("/health")
 def health() -> dict:
     if engine is None:
@@ -59,8 +67,9 @@ async def search(req: SearchRequest) -> SearchResponse:
 
 
 @app.get("/attachment/{att_id}")
-def attachment(att_id: int) -> Response:
+def attachment(att_id: int, request: Request) -> Response:
     """Serve an iMessage image attachment by its rowid."""
+    _reject_browser(request)
     if engine is None:
         raise HTTPException(503, _engine_unavailable_reason())
     path = engine.get_image_path(att_id)
@@ -99,8 +108,9 @@ def attachment(att_id: int) -> Response:
 
 
 @app.get("/contact-photo/{key}")
-def contact_photo(key: str) -> Response:
+def contact_photo(key: str, request: Request) -> Response:
     """Serve a contact photo blob by its 16-hex key. Falls back to 404 if missing."""
+    _reject_browser(request)
     if not SAFE_KEY.match(key):
         raise HTTPException(400, "invalid key")
     path = CONTACTS_DIR / f"{key}.bin"

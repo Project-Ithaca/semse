@@ -20,6 +20,7 @@ from .models import ChunkMessage, QueryIntent, SearchRequest, SearchResponse, So
 INDEXER_DIR = Path(__file__).resolve().parent.parent / "indexer"
 sys.path.insert(0, str(INDEXER_DIR))
 from embedder import Embedder  # noqa: E402
+from persona_builder import escape_like  # noqa: E402
 
 DATA_DIR = INDEXER_DIR / "data"
 INDEX_PATH = DATA_DIR / "index.faiss"
@@ -328,8 +329,10 @@ class SearchEngine:
         Optionally filtered to chunks before `before_iso`."""
         if not contact_filter:
             return []
-        like_args = [f'%{json.dumps(n)[1:-1]}%' for n in contact_filter]
-        conditions = " OR ".join("contact_names LIKE ?" for _ in like_args)
+        # Same escaped raw-unicode pattern as the indexer (contact_names is
+        # stored with ensure_ascii=False, so match the literal name).
+        like_args = [f'%"{escape_like(n)}"%' for n in contact_filter]
+        conditions = " OR ".join("contact_names LIKE ? ESCAPE '\\'" for _ in like_args)
         params: list = list(like_args)
         extra = ""
         if before_iso:

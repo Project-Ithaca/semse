@@ -27,9 +27,17 @@ from pathlib import Path
 import numpy as np
 from sklearn.cluster import KMeans
 
-LLM_BASE_URL = os.getenv("SEMSE_LLM_BASE_URL", "http://localhost:11434/v1")
-LLM_MODEL = os.getenv("SEMSE_LLM_MODEL", "qwen2.5:7b")
 MIN_MESSAGES_FOR_PERSONA = 10   # skip contacts with fewer individual messages
+
+
+# Read at call time, not import time, so load_dotenv() in __main__ blocks
+# still applies overrides.
+def llm_base_url() -> str:
+    return os.getenv("SEMSE_LLM_BASE_URL", "http://localhost:11434/v1")
+
+
+def llm_model() -> str:
+    return os.getenv("SEMSE_LLM_MODEL", "qwen2.5:7b")
 
 # Unicode ranges covering the most common emoji codepoints — no new dep needed.
 # Deliberately narrow: broad ranges like U+24C2–U+1F251 swallow all CJK text.
@@ -51,7 +59,8 @@ _EMOJI_RE = re.compile(
 def make_llm_client(async_client: bool = False):
     """OpenAI-compatible client pointed at a local server (Ollama) by default.
 
-    A real OPENAI_API_KEY plus unset SEMSE_LLM_BASE_URL falls back to OpenAI.
+    Set SEMSE_LLM_PREFER_OPENAI=1 (with OPENAI_API_KEY, and SEMSE_LLM_BASE_URL
+    unset) to route to OpenAI instead.
     """
     from openai import AsyncOpenAI, OpenAI
 
@@ -60,7 +69,7 @@ def make_llm_client(async_client: bool = False):
     if openai_key and not explicit_local and os.getenv("SEMSE_LLM_PREFER_OPENAI"):
         kwargs = {"api_key": openai_key}
     else:
-        kwargs = {"base_url": LLM_BASE_URL, "api_key": openai_key or "ollama"}
+        kwargs = {"base_url": llm_base_url(), "api_key": openai_key or "ollama"}
     return AsyncOpenAI(**kwargs) if async_client else OpenAI(**kwargs)
 
 
@@ -72,8 +81,8 @@ def check_llm_available() -> str | None:
         return None
     except Exception as e:
         return (
-            f"LLM endpoint unreachable at {LLM_BASE_URL} ({e}). "
-            "Start it with: ollama serve  (and: ollama pull " + LLM_MODEL + ")"
+            f"LLM endpoint unreachable at {llm_base_url()} ({e}). "
+            "Start it with: ollama serve  (and: ollama pull " + llm_model() + ")"
         )
 
 
@@ -261,7 +270,7 @@ def _cluster_and_label(
     llm_ok = True
     try:
         resp = client.chat.completions.create(
-            model=LLM_MODEL,
+            model=llm_model(),
             temperature=0.0,
             max_tokens=120,
             messages=[
@@ -317,7 +326,7 @@ def _style_summary(rep_messages: list[str], name: str, client) -> tuple[str, boo
     sample_block = "\n\n".join(f"• {m}" for m in rep_messages)
     try:
         resp = client.chat.completions.create(
-            model=LLM_MODEL,
+            model=llm_model(),
             temperature=0.0,
             max_tokens=80,
             messages=[
