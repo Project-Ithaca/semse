@@ -6,7 +6,7 @@ distinct from contact_summaries which captures the user's relationship with them
 Algorithm per contact:
   1. Extract all individual messages from that contact (is_from_me=False) from chunks.
   2. Compute style stats: avg length, emoji frequency, response_style bucket.
-  3. K-means cluster messages into min(8, n//20) topic buckets; label each via LLM.
+  3. K-means cluster messages into min(8, max(2, n//10)) topic buckets; label each via LLM.
   4. Generate 1-sentence style summary via LLM from 5 representative messages.
   5. Cache by sample_hash; skip LLM if unchanged.
 

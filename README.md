@@ -11,6 +11,8 @@ then get accurate results:
 
 everything runs locally: embeddings, search, and the answer-writing LLM. nothing leaves your Mac.
 
+it searches basically everything on your Mac: **iMessage, Apple Mail, WhatsApp, Apple Notes, Calendar, Reminders, call history, browser history (Safari/Chrome/Arc), and image attachments**. say "in my notes" / "on whatsapp" / "who did I call" and it scopes to that source automatically.
+
 ## Setup
 
 Requires macOS 26+ (for the app), Python 3.11, and Full Disk Access granted to your terminal (to read the iMessage/Mail databases).
@@ -25,8 +27,8 @@ brew install ollama
 ollama pull qwen2.5:14b
 ollama serve   # keep running (or: brew services start ollama)
 
-# 3. Build the index (~20-30 min first time)
-.venv/bin/python indexer/build_index.py --sources imessage mail --summaries --personas
+# 3. Build the index (~30-40 min first time)
+.venv/bin/python indexer/build_index.py --sources imessage mail calendar reminders notes whatsapp browsing calls --summaries --personas
 
 # 4. Build the app once
 cd app-mac && swift build -c release && cd ..
@@ -47,6 +49,10 @@ Nightly index refresh: add `scripts/update_index.sh` to cron (see the comment in
 - `how has [name] changed recently` — recent vs. older topic shift
 - `what do [name1] and [name2] both think about [topic]` — comparison
 - `has anyone recommended a ramen place` — regular semantic search
+- `what did I write in my notes about [topic]` — searches Apple Notes
+- `who did I call last month` — call history
+- `any calendar events about [topic]` / `what reminders do I have`
+- `what did we talk about on whatsapp`
 
 ## Tests
 

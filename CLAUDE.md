@@ -2,8 +2,9 @@
 
 ## Vision
 
-A Spotlight-style semantic search over your entire personal communication history
-(iMessage, Apple Mail, image attachments). One search bar, natural language queries,
+A Spotlight-style semantic search over your entire personal digital history
+(iMessage, Apple Mail, WhatsApp, Notes, Calendar, Reminders, call history,
+browser history, image attachments). One search bar, natural language queries,
 synthesized answer + cited source cards in ~2 seconds. Fully local: embeddings,
 FAISS search, and LLM synthesis all run on-device. No data leaves the machine.
 
@@ -87,10 +88,10 @@ The API degrades gracefully when the LLM is down: sources still return, answer i
 
 ```bash
 # Full index build (needs Full Disk Access for the host app)
-.venv/bin/python indexer/build_index.py --sources imessage mail --summaries --personas
+.venv/bin/python indexer/build_index.py --sources imessage mail calendar reminders notes whatsapp browsing calls --summaries --personas
 
 # Incremental (also what scripts/update_index.sh runs nightly)
-.venv/bin/python indexer/build_index.py --sources imessage mail --update --summaries --personas
+.venv/bin/python indexer/build_index.py --sources imessage mail calendar reminders notes whatsapp browsing calls --update --summaries --personas
 
 # API
 .venv/bin/uvicorn api.main:app --port 8000
