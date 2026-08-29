@@ -20,6 +20,7 @@ out/
 
 # Swift Package Manager build output
 app-mac/.build/
+app-mac/dist/
 app-mac/.swiftpm/
 app-mac/Package.resolved
 .build/

@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var hosting: NSHostingView<SearchView>?
     private var hotKey: GlobalHotKey?
     private var statusItem: NSStatusItem?
+    private var statusMenu: NSMenu?
     private let panelWidth: CGFloat = 720
     private let panelMinHeight: CGFloat = 56  // matches the input row exactly
     private let panelMaxHeight: CGFloat = 640
@@ -21,6 +22,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var idleClearTask: Task<Void, Never>?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        BackendLauncher.ensureStackRunning()
+
         let panel = SpotlightPanel()
         panel.delegate = self
         let root = SearchView(
@@ -92,23 +95,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func installStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = item.button {
-            let image = NSImage(systemSymbolName: "magnifyingglass.circle", accessibilityDescription: "Memory")
+            let image = NSImage(systemSymbolName: "magnifyingglass.circle", accessibilityDescription: "Semse")
             image?.isTemplate = true
             button.image = image
             button.target = self
             button.action = #selector(statusItemClicked)
+            // Left-click toggles the panel; right-click (or ctrl-click) opens the menu.
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
         let menu = NSMenu()
         menu.addItem(withTitle: "Search…  (⌃⌥Space)", action: #selector(togglePanelAction), keyEquivalent: "")
             .target = self
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Quit", action: #selector(quitAction), keyEquivalent: "q")
+        menu.addItem(withTitle: "Quit Semse", action: #selector(quitAction), keyEquivalent: "q")
             .target = self
-        item.menu = menu
+        // Intentionally NOT assigned to item.menu — a standing menu would
+        // swallow left-clicks. It is attached transiently for right-clicks.
+        self.statusMenu = menu
         self.statusItem = item
     }
 
-    @objc private func statusItemClicked() { togglePanel() }
+    @objc private func statusItemClicked() {
+        let event = NSApp.currentEvent
+        if event?.type == .rightMouseUp || event?.modifierFlags.contains(.control) == true {
+            showStatusMenu()
+        } else {
+            togglePanel()
+        }
+    }
+
+    private func showStatusMenu() {
+        guard let item = statusItem, let menu = statusMenu else { return }
+        // Attach the menu just long enough for the synthesized click to pop it,
+        // then detach so plain left-clicks keep toggling the panel.
+        item.menu = menu
+        item.button?.performClick(nil)
+        item.menu = nil
+    }
     @objc private func togglePanelAction() { togglePanel() }
     @objc private func quitAction() { NSApp.terminate(nil) }
 
