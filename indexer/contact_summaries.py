@@ -14,7 +14,7 @@ Algorithm per contact:
      representative chunk for that topic blob.
   5. Sample 1 substantive message from each representative chunk.
   6. Send all samples + stats (first contact, total exchanged, recent activity)
-     to gpt-4o-mini → one factual relationship sentence.
+     to the local LLM (see persona_builder) → one factual relationship sentence.
   7. Cache by hash so unchanged contacts skip the LLM on re-runs.
 
 Total cost across ~50 contacts is < 1¢. Refresh weekly — the structure is
@@ -25,7 +25,6 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
-import os
 import sqlite3
 import sys
 from dataclasses import dataclass
@@ -36,8 +35,8 @@ import numpy as np
 from sklearn.cluster import KMeans
 
 from contacts import Contact, ContactResolver
+from persona_builder import LLM_MODEL, check_llm_available, escape_like, make_llm_client
 
-OPENAI_MODEL = "gpt-4o-mini"
 MAX_CLUSTERS = 8
 MIN_CHUNKS_FOR_CLUSTERING = 6      # below this, just sample a few messages directly
 MIN_CHUNKS_FOR_SUMMARY = 2
@@ -107,11 +106,11 @@ def _chunks_for_contact(conn: sqlite3.Connection, name: str, id_map_pos: dict[st
     Matches via JSON contains on contact_names (case-sensitive — names are
     normalized at index time so this is safe).
     """
-    quoted = json.dumps(name)              # → "Brendan Giang"
-    like = f'%{quoted[1:-1]}%'             # crude but effective; safer than json_each
+    # Match the full JSON-quoted name so "Al" can't match "Alice Smith".
+    like = f'%"{escape_like(name)}"%'
     rows = conn.execute(
         "SELECT chunk_id, messages, date_start FROM chunks "
-        "WHERE source='imessage' AND contact_names LIKE ?",
+        "WHERE source='imessage' AND contact_names LIKE ? ESCAPE '\\'",
         (like,),
     ).fetchall()
     out: list[tuple[int, dict, str, str]] = []
@@ -191,14 +190,11 @@ def _hash(samples: list[str], name: str) -> str:
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
 
 
-def build(metadata_db: Path, index_path: Path, id_map_path: Path,
-          openai_api_key: str | None = None) -> int:
-    api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        print("contact_summaries: OPENAI_API_KEY not set; skipping LLM summarization", file=sys.stderr)
-        return 0
-    from openai import OpenAI
-    client = OpenAI(api_key=api_key)
+def build(metadata_db: Path, index_path: Path, id_map_path: Path) -> int:
+    err = check_llm_available()
+    if err:
+        raise SystemExit(f"contact_summaries: {err}")
+    client = make_llm_client()
 
     print("Loading FAISS + id_map…", file=sys.stderr)
     index = faiss.read_index(str(index_path))
@@ -237,7 +233,7 @@ def build(metadata_db: Path, index_path: Path, id_map_path: Path,
         sample_block = "\n\n".join(f"• {s}" for s in samples)
         try:
             resp = client.chat.completions.create(
-                model=OPENAI_MODEL,
+                model=LLM_MODEL,
                 temperature=0.0,
                 max_tokens=80,
                 messages=[
@@ -279,6 +275,6 @@ def build(metadata_db: Path, index_path: Path, id_map_path: Path,
 if __name__ == "__main__":
     from dotenv import load_dotenv
     load_dotenv(Path(__file__).parent.parent / "api" / ".env")
+    load_dotenv(Path(__file__).parent / ".env")
     base = Path(__file__).parent / "data"
-    n = build(base / "metadata.db", base / "index.faiss", base / "id_map.json")
-    sys.exit(0 if n >= 0 else 1)
+    build(base / "metadata.db", base / "index.faiss", base / "id_map.json")

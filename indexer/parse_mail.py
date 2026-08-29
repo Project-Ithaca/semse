@@ -42,10 +42,16 @@ def _is_newsletter_sender(addr: str | None) -> bool:
 
 
 def _find_mail_root() -> Path:
-    candidates = sorted(glob.glob(MAIL_ROOT_GLOB))
+    candidates = glob.glob(MAIL_ROOT_GLOB)
     if not candidates:
         raise FileNotFoundError(f"No Apple Mail data found at {MAIL_ROOT_GLOB}")
-    return Path(candidates[-1])  # most recent versioned folder
+
+    # Lexicographic sort picks V9 over V10 — compare the numeric part instead.
+    def version_num(p: str) -> int:
+        m = re.search(r"V(\d+)$", p)
+        return int(m.group(1)) if m else -1
+
+    return Path(max(candidates, key=version_num))  # most recent versioned folder
 
 
 def _envelope_index_path(mail_root: Path) -> Path:
@@ -116,7 +122,13 @@ def _ts_to_iso(ts) -> str:
     if ts is None:
         return ""
     try:
-        return datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
+        # Naive-UTC ISO (no "+00:00") to match parse_imessage — downstream
+        # date comparisons are lexicographic string compares.
+        return (
+            datetime.fromtimestamp(int(ts), tz=timezone.utc)
+            .replace(tzinfo=None)
+            .isoformat()
+        )
     except (TypeError, ValueError, OSError):
         return ""
 

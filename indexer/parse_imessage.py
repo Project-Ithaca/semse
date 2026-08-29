@@ -70,7 +70,13 @@ def imessage_date_to_iso(ns: int) -> str:
     if ns is None:
         return ""
     unix_ts = ns / 1_000_000_000 + MAC_EPOCH_OFFSET
-    return datetime.datetime.utcfromtimestamp(unix_ts).isoformat()
+    # Naive-UTC ISO (no offset suffix) — all date comparisons downstream are
+    # lexicographic, so every source must emit the same shape.
+    return (
+        datetime.datetime.fromtimestamp(unix_ts, tz=datetime.timezone.utc)
+        .replace(tzinfo=None)
+        .isoformat()
+    )
 
 
 def iso_to_imessage_ns(iso: str) -> int:

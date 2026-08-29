@@ -47,6 +47,7 @@ def _init_metadata_db(path: Path) -> sqlite3.Connection:
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_date_end ON chunks(date_end)")
     conn.execute(
         """
         CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
@@ -74,22 +75,9 @@ def _init_metadata_db(path: Path) -> sqlite3.Connection:
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_images_date ON images(date_iso)")
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS contact_personas (
-            name TEXT PRIMARY KEY,
-            style_summary TEXT,
-            avg_msg_length REAL,
-            emoji_frequency REAL,
-            response_style TEXT,
-            top_topics TEXT,
-            first_message_iso TEXT,
-            last_message_iso TEXT,
-            total_messages INTEGER,
-            sample_hash TEXT
-        )
-        """
-    )
+    # contact_personas schema lives in persona_builder — single source of truth.
+    from persona_builder import init_db as init_personas_table
+    init_personas_table(conn)
     return conn
 
 
@@ -116,6 +104,13 @@ def _persist_chunks(conn: sqlite3.Connection, chunks: list[Chunk]) -> None:
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         rows,
+    )
+    # chunks uses INSERT OR REPLACE but fts5 has no PK — delete first, or
+    # --update reruns leave duplicate FTS rows that skew bm25 scores.
+    conn.execute(
+        "DELETE FROM chunks_fts WHERE chunk_id IN ("
+        + ",".join("?" * len(chunks)) + ")",
+        [c.chunk_id for c in chunks],
     )
     conn.executemany(
         "INSERT INTO chunks_fts (chunk_id, text) VALUES (?, ?)",
@@ -199,10 +194,14 @@ def _read_cutoffs(meta_path: Path, sources: set[str]) -> dict[str, str]:
         conn.close()
 
 
-def _build_image_index(resolver: ContactResolver, conn: sqlite3.Connection) -> int:
+def _build_image_index(
+    resolver: ContactResolver, conn: sqlite3.Connection, update: bool = False
+) -> int:
     """Walk attachment table, embed each image with CLIP, save FAISS + metadata.
 
-    Returns the number of images successfully indexed.
+    With `update=True` (and an existing image index), attachments already in the
+    `images` table are skipped and new vectors are appended to the existing index.
+    Returns the number of images successfully indexed this run.
     """
     from parse_attachments import iter_image_attachments
     from clip_embedder import CLIP_DIM, ClipEmbedder
@@ -210,7 +209,18 @@ def _build_image_index(resolver: ContactResolver, conn: sqlite3.Connection) -> i
     print("Enumerating image attachments…", file=sys.stderr)
     attachments = list(iter_image_attachments(resolver=resolver))
     print(f"  {len(attachments):,} image files on disk", file=sys.stderr)
+
+    if update and not (IMAGE_INDEX_PATH.exists() and IMAGE_ID_MAP_PATH.exists()):
+        update = False
+    n_skipped = 0
+    if update:
+        already = {row[0] for row in conn.execute("SELECT attachment_id FROM images")}
+        fresh = [a for a in attachments if a.attachment_id not in already]
+        n_skipped = len(attachments) - len(fresh)
+        attachments = fresh
+        print(f"  {n_skipped:,} already indexed, {len(attachments):,} new", file=sys.stderr)
     if not attachments:
+        print(f"  images: {n_skipped:,} skipped, 0 embedded, 0 failed", file=sys.stderr)
         return 0
 
     embedder = ClipEmbedder.shared()
@@ -228,15 +238,29 @@ def _build_image_index(resolver: ContactResolver, conn: sqlite3.Connection) -> i
         for idx in kept_idx:
             kept_atts.append(batch[idx])
 
+    # clip_embedder drops unreadable images silently; the kept_indices return
+    # is the only visibility we get, so count the difference here.
+    n_failed = len(attachments) - len(kept_atts)
     if not all_vecs:
+        print(f"  images: {n_skipped:,} skipped, 0 embedded, {n_failed:,} failed", file=sys.stderr)
         return 0
 
     matrix = np.vstack(all_vecs)
-    print(f"  built {matrix.shape[0]:,} image vectors", file=sys.stderr)
+    print(
+        f"  images: {n_skipped:,} skipped, {matrix.shape[0]:,} embedded, {n_failed:,} failed",
+        file=sys.stderr,
+    )
 
-    index = _build_faiss(matrix, dim=CLIP_DIM)
+    if update:
+        index = faiss.read_index(str(IMAGE_INDEX_PATH))
+        index.add(matrix)
+        existing_ids = json.loads(IMAGE_ID_MAP_PATH.read_text())
+        existing_ids.extend(a.attachment_id for a in kept_atts)
+        IMAGE_ID_MAP_PATH.write_text(json.dumps(existing_ids))
+    else:
+        index = _build_faiss(matrix, dim=CLIP_DIM)
+        IMAGE_ID_MAP_PATH.write_text(json.dumps([a.attachment_id for a in kept_atts]))
     faiss.write_index(index, str(IMAGE_INDEX_PATH))
-    IMAGE_ID_MAP_PATH.write_text(json.dumps([a.attachment_id for a in kept_atts]))
 
     rows = [
         (
@@ -305,7 +329,7 @@ def build(sources: set[str], update: bool = False) -> None:
             print("No text chunks produced.", file=sys.stderr)
             if do_images:
                 conn = _init_metadata_db(META_DB_PATH)
-                n_images = _build_image_index(resolver, conn)
+                n_images = _build_image_index(resolver, conn, update=update)
                 conn.close()
                 print(f"\n=== Image index built ===\n  {n_images:,} images embedded", file=sys.stderr)
             return
@@ -334,7 +358,7 @@ def build(sources: set[str], update: bool = False) -> None:
             ID_MAP_PATH.write_text(json.dumps(existing_ids))
 
             if do_images:
-                n_images = _build_image_index(resolver, conn)
+                n_images = _build_image_index(resolver, conn, update=True)
             conn.close()
         else:
             print("Building text FAISS index…", file=sys.stderr)
@@ -398,7 +422,7 @@ def build(sources: set[str], update: bool = False) -> None:
             print("metadata.db missing — run a text build first.", file=sys.stderr)
             return
         conn = _init_metadata_db(META_DB_PATH)
-        n_images = _build_image_index(resolver, conn)
+        n_images = _build_image_index(resolver, conn, update=update)
         conn.close()
         print(f"\n=== Image index built ===\n  {n_images:,} images embedded", file=sys.stderr)
 
@@ -414,6 +438,9 @@ def _build_contact_personas() -> None:
 
 
 def main() -> None:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent.parent / "api" / ".env")
+    load_dotenv(Path(__file__).parent / ".env")
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--sources",
