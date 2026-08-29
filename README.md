@@ -22,7 +22,7 @@ python3.11 -m venv .venv
 
 # 2. Local LLM (answers are written by a model running on your Mac)
 brew install ollama
-ollama pull qwen2.5:7b
+ollama pull qwen2.5:14b
 ollama serve   # keep running (or: brew services start ollama)
 
 # 3. Build the index (~20-30 min first time)

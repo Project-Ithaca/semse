@@ -45,10 +45,10 @@ All synthesis/persona/summary calls go through an OpenAI-compatible client
 configured by env vars (read at call time):
 
 - `SEMSE_LLM_BASE_URL` — default `http://localhost:11434/v1` (Ollama)
-- `SEMSE_LLM_MODEL` — default `qwen2.5:7b`
+- `SEMSE_LLM_MODEL` — default `qwen2.5:14b`
 - Escape hatch: `SEMSE_LLM_PREFER_OPENAI=1` + `OPENAI_API_KEY` routes to OpenAI.
 
-Setup: `brew install ollama && ollama pull qwen2.5:7b && ollama serve`.
+Setup: `brew install ollama && ollama pull qwen2.5:14b && ollama serve`.
 The API degrades gracefully when the LLM is down: sources still return, answer is empty.
 
 ## Key runtime behavior

@@ -37,7 +37,7 @@ def llm_base_url() -> str:
 
 
 def llm_model() -> str:
-    return os.getenv("SEMSE_LLM_MODEL", "qwen2.5:7b")
+    return os.getenv("SEMSE_LLM_MODEL", "qwen2.5:14b")
 
 # Unicode ranges covering the most common emoji codepoints — no new dep needed.
 # Deliberately narrow: broad ranges like U+24C2–U+1F251 swallow all CJK text.

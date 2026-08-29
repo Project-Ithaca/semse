@@ -32,7 +32,7 @@ IMAGE_ID_MAP_PATH = DATA_DIR / "image_id_map.json"
 # Local OpenAI-compatible server (Ollama) by default — same pattern as
 # indexer/persona_builder.py.
 LLM_BASE_URL = os.getenv("SEMSE_LLM_BASE_URL", "http://localhost:11434/v1")
-LLM_MODEL = os.getenv("SEMSE_LLM_MODEL", "qwen2.5:7b")
+LLM_MODEL = os.getenv("SEMSE_LLM_MODEL", "qwen2.5:14b")
 
 # Strict prompt: model must return empty string when excerpts don't address the query.
 SYSTEM_PROMPT = """You are a personal memory search assistant.
