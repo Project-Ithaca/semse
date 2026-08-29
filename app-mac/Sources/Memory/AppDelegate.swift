@@ -14,7 +14,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var statusMenu: NSMenu?
     private let panelWidth: CGFloat = 720
     private let panelMinHeight: CGFloat = 56  // matches the input row exactly
-    private let panelMaxHeight: CGFloat = 640
+    // Cap the panel at ~60% of the screen so results never crowd the display;
+    // SearchView derives its inner scroll cap from the same 60% figure.
+    private var panelMaxHeight: CGFloat {
+        let screenHeight = NSScreen.main?.visibleFrame.height ?? 900
+        return max(360, screenHeight * 0.6)
+    }
+    // UserDefaults keys for the user-dragged panel position. We persist the
+    // TOP-LEFT corner because the panel grows/shrinks with its top edge fixed,
+    // so the top-left stays stable across content-height changes.
+    private static let savedOriginXKey = "semse.panel.topLeftX"
+    private static let savedTopYKey = "semse.panel.topLeftY"
+    // Set around programmatic setFrame/setFrameOrigin calls so windowDidMove
+    // only persists positions that came from an actual user drag.
+    private var isProgrammaticMove = false
     // Clears the search state if the panel stays hidden this long. The timer
     // runs ONLY while the panel is hidden — a user who keeps Semse open and
     // reads results never gets reset.
@@ -84,7 +97,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             width: panelWidth,
             height: target
         )
+        isProgrammaticMove = true
         panel.setFrame(newFrame, display: true, animate: false)
+        isProgrammaticMove = false
         // Window shadow is cached against the previous alpha mask; force a
         // redraw so the shadow follows the new rounded bottom edge.
         panel.invalidateShadow()
@@ -184,12 +199,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func positionPanel(_ panel: NSPanel) {
-        guard let screen = NSScreen.main else { return }
         let panelSize = panel.frame.size
+        // Restore the user's dragged position when one is saved and still lands
+        // usably on a connected screen; otherwise fall back to centering.
+        if let topLeft = savedTopLeft() {
+            let candidate = NSRect(
+                x: topLeft.x,
+                y: topLeft.y - panelSize.height,
+                width: panelSize.width,
+                height: panelSize.height
+            )
+            if isUsablyOnScreen(candidate) {
+                isProgrammaticMove = true
+                panel.setFrameOrigin(candidate.origin)
+                isProgrammaticMove = false
+                return
+            }
+        }
+        guard let screen = NSScreen.main else { return }
         let v = screen.visibleFrame
         let x = v.midX - panelSize.width / 2
         let y = v.maxY - panelSize.height - v.height * 0.22
+        isProgrammaticMove = true
         panel.setFrameOrigin(NSPoint(x: x, y: y))
+        isProgrammaticMove = false
+    }
+
+    private func savedTopLeft() -> NSPoint? {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: Self.savedOriginXKey) != nil,
+              defaults.object(forKey: Self.savedTopYKey) != nil else { return nil }
+        return NSPoint(
+            x: defaults.double(forKey: Self.savedOriginXKey),
+            y: defaults.double(forKey: Self.savedTopYKey)
+        )
+    }
+
+    /// A saved frame is usable if a meaningful slice of it is on some screen —
+    /// guards against restoring onto a display that was since disconnected.
+    private func isUsablyOnScreen(_ frame: NSRect) -> Bool {
+        for screen in NSScreen.screens {
+            let overlap = screen.visibleFrame.intersection(frame)
+            if overlap.width >= 200 && overlap.height >= 40 { return true }
+        }
+        return false
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        guard !isProgrammaticMove, let panel = spotlightPanel, panel.isVisible else { return }
+        let defaults = UserDefaults.standard
+        defaults.set(Double(panel.frame.origin.x), forKey: Self.savedOriginXKey)
+        defaults.set(Double(panel.frame.maxY), forKey: Self.savedTopYKey)
     }
 
     func windowDidResignKey(_ notification: Notification) {

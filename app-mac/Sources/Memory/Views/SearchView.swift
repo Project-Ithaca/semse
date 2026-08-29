@@ -18,10 +18,13 @@ struct SearchView: View {
 
     private let minQueryLength = 3
     private let debounceMs: UInt64 = 250
-    // Max height for the results scroll area. The panel itself caps at 640
-    // (see panelMaxHeight in AppDelegate); 540 leaves room for the input row
-    // and a small padding above the divider.
-    private let scrollMaxHeight: CGFloat = 540
+    // Max height for the results scroll area. The panel itself caps at ~60%
+    // of the screen (see panelMaxHeight in AppDelegate); subtracting ~90pt
+    // leaves room for the input row and the divider.
+    private var scrollMaxHeight: CGFloat {
+        let screenHeight = NSScreen.main?.visibleFrame.height ?? 900
+        return max(300, screenHeight * 0.6 - 90)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -57,6 +60,13 @@ struct SearchView: View {
         }
         .frame(width: 720)
         .fixedSize(horizontal: false, vertical: true)
+        // Explicit drag strip along the top edge (sits inside the input row's
+        // top padding) so the panel stays draggable even when SwiftUI content
+        // fills the rest of the background.
+        .overlay(alignment: .top) {
+            PanelDragHandle()
+                .frame(height: 12)
+        }
         .background(
             GeometryReader { proxy in
                 Color.clear.preference(key: ContentHeightKey.self, value: proxy.size.height)
@@ -251,6 +261,20 @@ private struct ResultsContentHeightKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())
+    }
+}
+
+/// Invisible strip that initiates a window drag on mouse-down. Placed along
+/// the panel's top edge so there is always a grabbable area, in addition to
+/// isMovableByWindowBackground picking up empty background regions.
+private struct PanelDragHandle: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { DragView() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    final class DragView: NSView {
+        override func mouseDown(with event: NSEvent) {
+            window?.performDrag(with: event)
+        }
     }
 }
 

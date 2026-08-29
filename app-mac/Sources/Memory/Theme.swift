@@ -10,6 +10,8 @@ enum Theme {
     // Source tint colors (used for the small platform pill).
     static let imessageGreen = Color(red: 48/255, green: 209/255, blue: 88/255)
     static let mailBlue = Color(red: 10/255, green: 132/255, blue: 1.0)
+    static let calendarRed = Color(red: 1.0, green: 69/255, blue: 58/255)
+    static let remindersOrange = Color(red: 1.0, green: 159/255, blue: 10/255)
 
     static let panelStroke = Color.white.opacity(0.06)
     static let dividerLine = Color.white.opacity(0.06)

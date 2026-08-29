@@ -7,11 +7,29 @@ struct SourceCard: View {
     @State private var expanded = false
 
     private let collapsedShown = 3
+    private let collapsedLines = 6
+
+    /// How this card's body is laid out, derived from the wire `source` tag.
+    /// Unknown tags fall through to `.generic` — plain text lines, never a
+    /// broken chat-bubble layout.
+    private enum RenderStyle {
+        case chat, mail, calendar, reminders, generic
+    }
+
+    private var renderStyle: RenderStyle {
+        switch result.source {
+        case "imessage": return .chat
+        case "mail": return .mail
+        case "calendar": return .calendar
+        case "reminders": return .reminders
+        default: return .generic
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             header
-            messagesView
+            bodyContent
             if hasMore && !expanded {
                 expandButton
             } else if expanded && hasMore {
@@ -28,7 +46,16 @@ struct SourceCard: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Avatar(name: primaryName, contactKey: primaryKey, size: 28)
+            switch renderStyle {
+            case .chat, .mail:
+                Avatar(name: primaryName, contactKey: primaryKey, size: 28)
+            case .calendar:
+                glyphBadge(systemName: "calendar", tint: Theme.calendarRed)
+            case .reminders:
+                glyphBadge(systemName: "checklist", tint: Theme.remindersOrange)
+            case .generic:
+                glyphBadge(systemName: "doc.text.magnifyingglass", tint: Color.white.opacity(0.55))
+            }
             VStack(alignment: .leading, spacing: 1) {
                 Text(displayTitle)
                     .font(.system(size: 13, weight: .semibold))
@@ -43,6 +70,37 @@ struct SourceCard: View {
         }
     }
 
+    private func glyphBadge(systemName: String, tint: Color) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(tint.opacity(0.18))
+            Image(systemName: systemName)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(tint)
+        }
+        .frame(width: 28, height: 28)
+    }
+
+    @ViewBuilder
+    private var bodyContent: some View {
+        switch renderStyle {
+        case .chat, .mail:
+            messagesView
+        case .calendar:
+            if !chunkLines.isEmpty {
+                linesBody(accent: Theme.calendarRed, bullet: nil)
+            }
+        case .reminders:
+            if !chunkLines.isEmpty {
+                linesBody(accent: nil, bullet: "circle")
+            }
+        case .generic:
+            if !chunkLines.isEmpty {
+                linesBody(accent: nil, bullet: nil)
+            }
+        }
+    }
+
     private var messagesView: some View {
         let (visible, hiddenAbove, hiddenBelow) = visibleWindow()
         return VStack(spacing: 4) {
@@ -50,7 +108,7 @@ struct SourceCard: View {
                 contextRow(text: "\(hiddenAbove) earlier message\(hiddenAbove == 1 ? "" : "s")")
             }
             ForEach(Array(visible.enumerated()), id: \.offset) { idx, msg in
-                if result.source == "mail" {
+                if renderStyle == .mail {
                     MailRow(message: msg, expanded: expanded)
                 } else {
                     MessageBubble(
@@ -63,6 +121,44 @@ struct SourceCard: View {
                 contextRow(text: "\(hiddenBelow) later message\(hiddenBelow == 1 ? "" : "s")")
             }
         }
+    }
+
+    /// Body for calendar / reminders / unknown sources: the chunk's text
+    /// rendered as plain lines, optionally with an event accent bar
+    /// (calendar) or a checklist bullet (reminders).
+    private func linesBody(accent: Color?, bullet: String?) -> some View {
+        let lines = expanded ? chunkLines : Array(chunkLines.prefix(collapsedLines))
+        return HStack(alignment: .top, spacing: 8) {
+            if let accent {
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(accent.opacity(0.8))
+                    .frame(width: 3)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        if let bullet {
+                            Image(systemName: bullet)
+                                .font(.system(size: 10))
+                                .foregroundColor(Theme.remindersOrange)
+                        }
+                        Text(line)
+                            .font(.system(size: 12.5))
+                            .foregroundColor(Theme.secondaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.white.opacity(0.03))
+        )
     }
 
     /// Center the visible window on the best-matching message (or the chunk
@@ -87,7 +183,7 @@ struct SourceCard: View {
             HStack(spacing: 6) {
                 Image(systemName: "chevron.up.chevron.down")
                     .font(.system(size: 10, weight: .semibold))
-                Text("Show full conversation (\(result.messages.count) messages)")
+                Text(expandLabel)
                     .font(.system(size: 11.5, weight: .medium))
             }
             .foregroundColor(Theme.accent)
@@ -134,12 +230,48 @@ struct SourceCard: View {
 
     // MARK: - Derived
 
-    private var hasMore: Bool { result.messages.count > collapsedShown }
+    private var hasMore: Bool {
+        switch renderStyle {
+        case .chat, .mail: return result.messages.count > collapsedShown
+        case .calendar, .reminders, .generic: return chunkLines.count > collapsedLines
+        }
+    }
+
+    private var expandLabel: String {
+        switch renderStyle {
+        case .chat, .mail:
+            return "Show full conversation (\(result.messages.count) messages)"
+        case .calendar, .reminders, .generic:
+            return "Show all \(chunkLines.count) lines"
+        }
+    }
+
+    /// The chunk's raw text split into display lines — used by the calendar,
+    /// reminders, and generic bodies. Falls back to `snippet` when the server
+    /// sent no per-message breakdown.
+    private var chunkLines: [String] {
+        let text = result.messages.isEmpty
+            ? result.snippet
+            : result.messages.map(\.text).joined(separator: "\n")
+        return text
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
 
     private var displayTitle: String {
-        if let chat = result.chatTitle, !chat.isEmpty { return chat }
-        if let subject = result.subject, !subject.isEmpty { return subject }
-        return result.contactNames.prefix(2).joined(separator: ", ")
+        // Calendar/reminders chunks carry the event/list name in `subject`;
+        // prefer it as the header for those (and any unknown) sources.
+        switch renderStyle {
+        case .calendar, .reminders, .generic:
+            if let subject = result.subject, !subject.isEmpty { return subject }
+            if let chat = result.chatTitle, !chat.isEmpty { return chat }
+        case .chat, .mail:
+            if let chat = result.chatTitle, !chat.isEmpty { return chat }
+            if let subject = result.subject, !subject.isEmpty { return subject }
+        }
+        let names = result.contactNames.prefix(2).joined(separator: ", ")
+        return names.isEmpty ? SourceLabels.label(for: result.source) : names
     }
 
     private var primaryName: String {
@@ -153,7 +285,7 @@ struct SourceCard: View {
     private var metaLine: String {
         let label = SourceLabels.label(for: result.source)
         let date = formatDate(result.dateStart)
-        return "\(label) · \(date)"
+        return date.isEmpty ? label : "\(label) · \(date)"
     }
 }
 
@@ -162,6 +294,9 @@ enum SourceLabels {
         switch source {
         case "imessage": return "iMessage"
         case "mail": return "Mail"
+        case "calendar": return "Calendar"
+        case "reminders": return "Reminders"
+        case "image": return "Image"
         case "hyperspell": return "Hyperspell"
         default: return source.capitalized
         }

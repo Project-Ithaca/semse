@@ -31,8 +31,8 @@ final class SpotlightPanel: NSPanel {
         self.backgroundColor = .clear
         self.hasShadow = true
         self.level = .floating
-        self.isMovableByWindowBackground = false
-        self.isMovable = false
+        self.isMovableByWindowBackground = true
+        self.isMovable = true
         self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         self.hidesOnDeactivate = false
         self.isReleasedWhenClosed = false
