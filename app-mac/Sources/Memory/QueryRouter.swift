@@ -190,7 +190,8 @@ actor QueryRouter {
             topic: topic,
             sources: wire.sources,
             contacts: contacts,
-            must_have_attachment: wire.must_have_attachment
+            must_have_attachment: wire.must_have_attachment,
+            query_type: wire.query_type
         )
     }
 

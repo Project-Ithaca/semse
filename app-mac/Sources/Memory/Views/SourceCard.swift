@@ -75,7 +75,7 @@ struct SourceCard: View {
         // Window of `collapsedShown` messages centered on the anchor, clamped.
         let half = collapsedShown / 2
         var start = max(0, anchor - half)
-        var end = min(count, start + collapsedShown)
+        let end = min(count, start + collapsedShown)
         if end - start < collapsedShown {
             start = max(0, end - collapsedShown)
         }
