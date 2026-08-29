@@ -61,6 +61,11 @@ IMAGE_ID_MAP_PATH = DATA_DIR / "image_id_map.json"
 # indexer/persona_builder.py.
 LLM_BASE_URL = os.getenv("SEMSE_LLM_BASE_URL", "http://localhost:11434/v1")
 LLM_MODEL = os.getenv("SEMSE_LLM_MODEL", "qwen2.5:14b")
+# How long Ollama keeps the model resident after the last request (the 14b
+# model holds ~9 GB while loaded). Passed per-request; ignored by non-Ollama
+# servers. Lower it (e.g. "2m") on memory-pressured machines.
+LLM_KEEP_ALIVE = os.getenv("SEMSE_LLM_KEEP_ALIVE", "5m")
+_LLM_EXTRA_BODY = {"keep_alive": LLM_KEEP_ALIVE}
 
 RRF_K = 60  # standard reciprocal rank fusion constant
 FUSE_FETCH = 24  # how many candidates each retriever pulls before fusion
@@ -357,6 +362,7 @@ class SearchEngine:
             fallback_answer = f"{name} mainly discusses: {topic_list}."
             try:
                 resp = await self._openai.chat.completions.create(
+                extra_body=_LLM_EXTRA_BODY,
                     model=LLM_MODEL,
                     temperature=0.0,
                     max_tokens=80,
@@ -450,6 +456,7 @@ class SearchEngine:
         label_map: dict[str, str] = {}
         try:
             resp = await self._openai.chat.completions.create(
+                extra_body=_LLM_EXTRA_BODY,
                 model=LLM_MODEL,
                 temperature=0.0,
                 max_tokens=200,
@@ -500,6 +507,7 @@ class SearchEngine:
         )
         try:
             resp = await self._openai.chat.completions.create(
+                extra_body=_LLM_EXTRA_BODY,
                 model=LLM_MODEL,
                 temperature=0.0,
                 max_tokens=120,
@@ -573,6 +581,7 @@ class SearchEngine:
         context = "\n\n".join(blocks)
         try:
             resp = await self._openai.chat.completions.create(
+                extra_body=_LLM_EXTRA_BODY,
                 model=LLM_MODEL,
                 temperature=0.0,
                 max_tokens=200,
@@ -1154,6 +1163,7 @@ class SearchEngine:
             )
         try:
             resp = await self._openai.chat.completions.create(
+                extra_body=_LLM_EXTRA_BODY,
                 model=LLM_MODEL,
                 temperature=0.0,
                 max_tokens=300,
@@ -1235,6 +1245,7 @@ class SearchEngine:
         )
         try:
             resp = await self._openai.chat.completions.create(
+                extra_body=_LLM_EXTRA_BODY,
                 model=LLM_MODEL,
                 temperature=0.0,
                 max_tokens=300,

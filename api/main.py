@@ -35,9 +35,11 @@ async def _warmup(eng: SearchEngine) -> None:
     except Exception:
         pass
     try:
+        from .search import _LLM_EXTRA_BODY
         await eng._openai.chat.completions.create(
             model=LLM_MODEL,
             max_tokens=5,
+            extra_body=_LLM_EXTRA_BODY,
             messages=[{"role": "user", "content": "ok"}],
         )
     except Exception:

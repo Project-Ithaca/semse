@@ -46,7 +46,10 @@ All synthesis/persona/summary calls go through an OpenAI-compatible client
 configured by env vars (read at call time):
 
 - `SEMSE_LLM_BASE_URL` — default `http://localhost:11434/v1` (Ollama)
-- `SEMSE_LLM_MODEL` — default `qwen2.5:14b`
+- `SEMSE_LLM_MODEL` — default `qwen2.5:14b` (~9 GB resident while loaded;
+  set `qwen2.5:7b` for a low-memory mode at some answer-quality cost)
+- `SEMSE_LLM_KEEP_ALIVE` — default `5m`; how long Ollama keeps the model in
+  RAM after the last request. Lower on memory-pressured machines.
 - Escape hatch: `SEMSE_LLM_PREFER_OPENAI=1` + `OPENAI_API_KEY` routes to OpenAI.
 
 Setup: `brew install ollama && ollama pull qwen2.5:14b && ollama serve`.
