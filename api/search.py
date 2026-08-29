@@ -252,12 +252,25 @@ class SearchEngine:
         out: set[str] = set()
         for t in tokens:
             if t in self._contact_norm_index:
-                # Only accept tokens that map UNAMBIGUOUSLY (one canonical name)
-                # or where the token IS the full canonical name. Otherwise a
-                # common first name like "alex" could pull in many people.
                 candidates = self._contact_norm_index[t]
                 if len(candidates) == 1:
                     out.update(candidates)
+                elif len(candidates) <= 4:
+                    # Ambiguous token ("ruthvik" → two contacts): take the one
+                    # the user actually messages, by chunk volume, when the
+                    # gap is decisive (>3x). A common first name shared by
+                    # many active contacts still gets dropped.
+                    ranked = sorted(
+                        candidates,
+                        key=lambda n: self._contact_summaries.get(n, {}).get(
+                            "total_chunks", 0
+                        ),
+                        reverse=True,
+                    )
+                    top = self._contact_summaries.get(ranked[0], {}).get("total_chunks", 0)
+                    second = self._contact_summaries.get(ranked[1], {}).get("total_chunks", 0)
+                    if top > 0 and top >= 3 * max(second, 1):
+                        out.add(ranked[0])
         return out
 
     def _resolve_contacts(self, extracted: list[str]) -> set[str]:
