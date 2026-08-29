@@ -9,5 +9,5 @@ cd "$(cd "$(dirname "$0")/.." && pwd)"
 mkdir -p indexer/data
 {
   echo "=== update_index $(date '+%Y-%m-%d %H:%M:%S') ==="
-  .venv/bin/python indexer/build_index.py --sources imessage mail --update --summaries --personas
+  .venv/bin/python indexer/build_index.py --sources imessage mail calendar reminders --update --summaries --personas
 } >> indexer/data/update.log 2>&1

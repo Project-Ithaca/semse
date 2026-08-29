@@ -174,6 +174,39 @@ def _collect_chunks(
             chunks.extend(mc)
         except FileNotFoundError as e:
             print(f"  skipping mail: {e}", file=sys.stderr)
+    # Calendar/reminders watermarks use max(date_end) like the other sources.
+    # Known v1 limitations: (a) edits to already-indexed items are not picked
+    # up, and (b) future-dated events (e.g. subscribed holiday calendars
+    # through 2031) push the watermark far forward, so events created later
+    # with earlier dates are skipped by --update until a full rebuild.
+    if "calendar" in sources:
+        cutoff = cutoffs.get("calendar")
+        suffix = f" (since {cutoff})" if cutoff else ""
+        print(f"Parsing Calendar{suffix}…", file=sys.stderr)
+        try:
+            from parse_calendar import iter_events
+            from chunker import chunk_calendar_events
+            events = list(iter_events(since_iso=cutoff))
+            print(f"  {len(events):,} events", file=sys.stderr)
+            cc = list(chunk_calendar_events(events))
+            print(f"  → {len(cc):,} chunks", file=sys.stderr)
+            chunks.extend(cc)
+        except FileNotFoundError as e:
+            print(f"  skipping calendar: {e}", file=sys.stderr)
+    if "reminders" in sources:
+        cutoff = cutoffs.get("reminders")
+        suffix = f" (since {cutoff})" if cutoff else ""
+        print(f"Parsing Reminders{suffix}…", file=sys.stderr)
+        try:
+            from parse_reminders import iter_reminders
+            from chunker import chunk_reminders
+            reminders = list(iter_reminders(since_iso=cutoff))
+            print(f"  {len(reminders):,} reminders", file=sys.stderr)
+            rc = list(chunk_reminders(reminders))
+            print(f"  → {len(rc):,} chunks", file=sys.stderr)
+            chunks.extend(rc)
+        except FileNotFoundError as e:
+            print(f"  skipping reminders: {e}", file=sys.stderr)
     return chunks
 
 
@@ -189,7 +222,15 @@ def _read_cutoffs(meta_path: Path, sources: set[str]) -> dict[str, str]:
             "GROUP BY source",
             tuple(sources),
         )
-        return {src: max_date for src, max_date in cur.fetchall() if max_date}
+        out = {src: max_date for src, max_date in cur.fetchall() if max_date}
+        # Calendar chunks include far-future events (subscribed holiday
+        # calendars run through ~2031), which would push the watermark past
+        # "now" and make --update skip every newly created event. Clamp it.
+        import datetime as _dt
+        now_iso = _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None).isoformat()
+        if out.get("calendar", "") > now_iso:
+            out["calendar"] = now_iso
+        return out
     finally:
         conn.close()
 
@@ -446,7 +487,7 @@ def main() -> None:
         "--sources",
         nargs="+",
         default=["imessage"],
-        choices=["imessage", "mail", "images"],
+        choices=["imessage", "mail", "calendar", "reminders", "images"],
         help="Sources to include in this build (images = CLIP image attachments)",
     )
     parser.add_argument(

@@ -363,6 +363,129 @@ def _build_mail_chunk(
     )
 
 
+@dataclass
+class CalendarEvent:
+    row_id: int
+    title: str
+    start_iso: str
+    end_iso: str
+    all_day: bool
+    calendar_name: str | None
+    location: str | None
+    notes: str | None
+
+
+@dataclass
+class ReminderItem:
+    row_id: int
+    title: str
+    notes: str | None
+    completed: bool
+    due_iso: str
+    completion_iso: str
+    date_iso: str          # best-available: completion → due → creation
+    list_name: str | None
+
+
+CALENDAR_EVENTS_PER_CHUNK = 15
+REMINDERS_PER_CHUNK = 15
+
+
+def _format_event_line(ev: CalendarEvent) -> str:
+    if ev.all_day:
+        when = ev.start_iso[:10]
+    else:
+        when = ev.start_iso[:16].replace("T", " ")
+    line = f"{when} — {ev.title}"
+    if ev.calendar_name:
+        line += f" ({ev.calendar_name})"
+    if ev.location:
+        line += f" @ {ev.location}"
+    if ev.notes:
+        notes = " ".join(ev.notes.split())
+        line += f" — {notes[:200]}"
+    return line
+
+
+def chunk_calendar_events(
+    events: Iterable[CalendarEvent],
+    per_chunk: int = CALENDAR_EVENTS_PER_CHUNK,
+) -> Iterator[Chunk]:
+    """Group events by calendar month, then split each month into chunks.
+
+    Snippet-style text chunks: `messages` stays empty, `subject` carries the
+    month label, `contact_names` stays empty (calendar names are not contacts).
+    """
+    by_month: dict[str, list[CalendarEvent]] = {}
+    for ev in events:
+        by_month.setdefault(ev.start_iso[:7], []).append(ev)
+
+    for month in sorted(by_month):
+        group = sorted(by_month[month], key=lambda e: e.start_iso)
+        for start in range(0, len(group), per_chunk):
+            slab = group[start : start + per_chunk]
+            yield Chunk(
+                chunk_id=_new_id(),
+                source="calendar",
+                contact_names=[],
+                date_start=min(e.start_iso for e in slab),
+                date_end=max(e.end_iso or e.start_iso for e in slab),
+                text="Calendar events for " + month + ":\n"
+                + "\n".join(_format_event_line(e) for e in slab),
+                row_ids=[e.row_id for e in slab],
+                messages=[],
+                subject=month,
+            )
+
+
+def _format_reminder_line(r: ReminderItem) -> str:
+    if r.completed:
+        prefix = f"[done {r.completion_iso[:10]}]" if r.completion_iso else "[done]"
+    elif r.due_iso:
+        prefix = f"[due {r.due_iso[:10]}]"
+    else:
+        prefix = "[open]"
+    line = f"{prefix} {r.title}"
+    if r.list_name:
+        line += f" ({r.list_name} list)"
+    if r.notes:
+        notes = " ".join(r.notes.split())
+        line += f" — {notes[:200]}"
+    return line
+
+
+def chunk_reminders(
+    reminders: Iterable[ReminderItem],
+    per_chunk: int = REMINDERS_PER_CHUNK,
+) -> Iterator[Chunk]:
+    """Group reminders by (list, completion status), then split into chunks.
+
+    Snippet-style text chunks like chunk_calendar_events: empty `messages`,
+    empty `contact_names`, `subject` carries the list name.
+    """
+    by_group: dict[tuple[str, bool], list[ReminderItem]] = {}
+    for r in reminders:
+        by_group.setdefault((r.list_name or "Reminders", r.completed), []).append(r)
+
+    for (list_name, completed) in sorted(by_group, key=lambda k: (k[0], k[1])):
+        group = sorted(by_group[(list_name, completed)], key=lambda r: r.date_iso)
+        status = "completed" if completed else "open"
+        for start in range(0, len(group), per_chunk):
+            slab = group[start : start + per_chunk]
+            yield Chunk(
+                chunk_id=_new_id(),
+                source="reminders",
+                contact_names=[],
+                date_start=min(r.date_iso for r in slab),
+                date_end=max(r.date_iso for r in slab),
+                text=f"Reminders ({list_name}, {status}):\n"
+                + "\n".join(_format_reminder_line(r) for r in slab),
+                row_ids=[r.row_id for r in slab],
+                messages=[],
+                subject=list_name,
+            )
+
+
 def chunk_message_to_dict(m: ChunkMessage) -> dict:
     return asdict(m)
 

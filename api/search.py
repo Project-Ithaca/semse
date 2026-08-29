@@ -97,6 +97,22 @@ No preamble. No quotation marks unless the quoted phrase is verbatim in the mess
 RRF_K = 60  # standard reciprocal rank fusion constant
 FUSE_FETCH = 24  # how many candidates each retriever pulls before fusion
 
+# Recency-weighted ranking: after RRF fusion, each fused score is multiplied by
+# 1 + RECENCY_BOOST * exp(-age_days / RECENCY_HALFLIFE_DAYS). Recent content
+# wins ties decisively; a strong old exact match still surfaces (max uplift is
+# only 1.35x). Skipped when an explicit temporal range already filters dates.
+RECENCY_BOOST = 0.35
+RECENCY_HALFLIFE_DAYS = 270.0
+
+# Temporal ("how has X changed") split tuning: recent = last N days, widened to
+# the newest fraction of the contact's chunks when the window is too thin.
+TEMPORAL_RECENT_DAYS = 90
+TEMPORAL_MIN_RECENT_CHUNKS = 15
+TEMPORAL_RECENT_FRACTION = 0.25
+TEMPORAL_RECENT_FLOOR = 10
+TEMPORAL_SIDE_SAMPLE = 300   # workload cap per side (embedding + clustering)
+TEMPORAL_FETCH_LIMIT = 1200  # newest chunks pulled per contact before splitting
+
 # Strip punctuation for pattern matching in _classify_query_type.
 _STRIP_PUNC = re.compile(r"[^\w\s]")
 
@@ -129,6 +145,12 @@ def _strip_query_tokens(text: str, tokens: set[str]) -> str:
     kept = [w for w in text.split() if _normalize_name(w) not in tokens]
     stripped = " ".join(kept)
     return stripped if stripped.strip() else text
+
+
+def _display_name(name: str) -> str:
+    """Capitalize all-lowercase saved contact names ("vedo" → "Vedo") for
+    answers; names with existing capitals are left untouched."""
+    return " ".join(w.capitalize() if w.islower() else w for w in (name or "").split())
 
 
 def _persona_topics(persona: dict) -> list[dict]:
@@ -179,6 +201,58 @@ _CONTACT_QUERY_STOPWORDS = {
     "mail", "email", "text", "texts", "message", "messages", "picture",
     "photo", "image", "pic",
 }
+
+
+def _parse_age_days(date_iso: str | None, now: "object" = None) -> float | None:
+    """Age in days of a naive-UTC ISO date string relative to `now` (naive-UTC
+    datetime; defaults to utcnow). Returns None when the date is missing or
+    unparseable — callers treat that as "no boost"."""
+    import datetime as _dt
+
+    if not date_iso:
+        return None
+    try:
+        d = _dt.datetime.fromisoformat(str(date_iso).replace("Z", "").strip())
+    except (ValueError, TypeError):
+        return None
+    if d.tzinfo is not None:
+        d = d.astimezone(_dt.timezone.utc).replace(tzinfo=None)
+    ref = now if now is not None else _dt.datetime.utcnow()
+    return (ref - d).total_seconds() / 86400.0
+
+
+def _recency_multiplier(age_days: float | None) -> float:
+    """Mild exponential time-decay boost. None (unknown date) → no boost;
+    future-dated chunks are clamped to age 0 (max boost)."""
+    import math
+
+    if age_days is None:
+        return 1.0
+    age = max(0.0, age_days)
+    return 1.0 + RECENCY_BOOST * math.exp(-age / RECENCY_HALFLIFE_DAYS)
+
+
+def _adaptive_recent_split(chunks: list, now: "object" = None) -> tuple[list, list]:
+    """Split chunks (sorted newest-first by date_end) into (recent, older).
+
+    Recent = last TEMPORAL_RECENT_DAYS days; when that yields fewer than
+    TEMPORAL_MIN_RECENT_CHUNKS, widen to the newest TEMPORAL_RECENT_FRACTION
+    of the contact's chunks (at least TEMPORAL_RECENT_FLOOR). A contact with
+    very few chunks total may end up with an empty `older` side — callers
+    treat that as "not enough history to compare"."""
+    if not chunks:
+        return [], []
+    cut = 0
+    for c in chunks:
+        age = _parse_age_days(getattr(c, "date_end", None), now=now)
+        if age is not None and age <= TEMPORAL_RECENT_DAYS:
+            cut += 1
+        else:
+            break
+    if cut < TEMPORAL_MIN_RECENT_CHUNKS:
+        frac = int(len(chunks) * TEMPORAL_RECENT_FRACTION)
+        cut = min(len(chunks), max(cut, TEMPORAL_RECENT_FLOOR, frac))
+    return chunks[:cut], chunks[cut:]
 
 
 def _best_message_index(messages: list[ChunkMessage], q_tokens: set[str]) -> int:
@@ -448,7 +522,8 @@ class SearchEngine:
         all_sources: list[SourceResult] = []
         answer_parts: list[str] = []
         for p in personas:
-            name = p["name"]
+            canonical = p["name"]
+            name = _display_name(canonical)
             topics = [t for t in _persona_topics(p) if isinstance(t.get("score"), (int, float))]
             if not topics:
                 continue
@@ -457,9 +532,12 @@ class SearchEngine:
                 for t in topics[:6]
             )
             prompt = (
-                f"Rewrite this as one natural sentence about what someone talks about most:\n"
-                f"{name} top topics: {topic_list}\n\nOutput: just the sentence, no preamble."
+                f"Rewrite this as one natural sentence about what {name} talks about most. "
+                f"Start the sentence with the name \"{name}\" and always refer to them by "
+                f"that name — never as \"someone\", \"they\", or \"this person\".\n"
+                f"{name}'s top topics: {topic_list}\n\nOutput: just the sentence, no preamble."
             )
+            fallback_answer = f"{name} mainly discusses: {topic_list}."
             try:
                 resp = await self._openai.chat.completions.create(
                     model=LLM_MODEL,
@@ -467,14 +545,21 @@ class SearchEngine:
                     max_tokens=80,
                     messages=[{"role": "user", "content": prompt}],
                 )
-                answer_parts.append((resp.choices[0].message.content or "").strip())
+                part = (resp.choices[0].message.content or "").strip()
+                # The rewrite must actually name the contact; a nameless
+                # "someone talks about…" is worse than the plain topic list.
+                first_name = name.split()[0].lower() if name.split() else ""
+                if part and first_name and first_name in part.lower():
+                    answer_parts.append(part)
+                else:
+                    answer_parts.append(fallback_answer)
             except Exception:
-                answer_parts.append(f"{name} mainly discusses: {topic_list}.")
+                answer_parts.append(fallback_answer)
 
             # One recent chunk per top topic as sources (up to 4).
             all_sources.extend(
                 await asyncio.to_thread(
-                    self._recent_chunks_for_contacts, {name}, min(4, top_k)
+                    self._recent_chunks_for_contacts, {canonical}, min(4, top_k)
                 )
             )
 
@@ -488,64 +573,132 @@ class SearchEngine:
         query: str,
         top_k: int,
     ) -> tuple[str, list[SourceResult]] | None:
-        """Return (answer, sources) for a temporal/change query, or None to fall through."""
-        import datetime as _dt
+        """Return (answer, sources) for a temporal/change query, or None to fall through.
+
+        Pipeline (≤2 LLM calls): adaptive recent/older split → K-means per side →
+        one LLM call labels every cluster with a concrete noun-phrase topic →
+        one LLM call compares the two labeled topic lists across date ranges.
+        """
         from sklearn.cluster import KMeans
 
-        cutoff = (_dt.datetime.utcnow() - _dt.timedelta(days=30)).isoformat()
-
-        # Pull recent and older chunks separately.
-        recent_chunks = await asyncio.to_thread(
-            self._recent_chunks_for_contacts, contact_filter, 50
+        chunks = await asyncio.to_thread(
+            self._recent_chunks_for_contacts, contact_filter, TEMPORAL_FETCH_LIMIT
         )
-        recent_chunks = [c for c in recent_chunks if (c.date_end or "") >= cutoff]
-        older_chunks = await asyncio.to_thread(
-            self._recent_chunks_for_contacts, contact_filter, 50, before_iso=cutoff
-        )
+        recent_chunks, older_chunks = _adaptive_recent_split(chunks)
+        if not recent_chunks or not older_chunks:
+            return None
 
-        def _top_topics(chunks: list[SourceResult], k: int = 3) -> list[str]:
-            """Extract top topic labels from chunks via K-means on text embeds."""
-            texts = [c.snippet or (c.messages[0].text if c.messages else "") for c in chunks]
-            texts = [t for t in texts if t and len(t) > 10]
-            if len(texts) < k:
-                return texts[:k]
+        recent_sample = recent_chunks[:TEMPORAL_SIDE_SAMPLE]
+        # Older side: sample evenly across the whole history, not just its
+        # newest slice, so long-ago topics still register.
+        stride = max(1, len(older_chunks) // TEMPORAL_SIDE_SAMPLE)
+        older_sample = older_chunks[::stride][:TEMPORAL_SIDE_SAMPLE]
+
+        def _chunk_text(c: SourceResult) -> str:
+            if c.messages:
+                return " ".join(m.text for m in c.messages if m.text)[:400]
+            return (c.snippet or "")[:400]
+
+        def _cluster_reps(side: list[SourceResult], k: int = 4) -> list[str]:
+            """Centroid-nearest representative text per K-means cluster."""
+            texts = [t for t in (_chunk_text(c) for c in side) if len(t) > 10]
+            if len(texts) < 8:
+                return sorted(texts, key=len, reverse=True)[:k]
             vecs = self.embedder.embed_batch(
                 texts, show_progress_bar=False
             ).astype("float32")
             n_clust = min(k, len(texts))
             km = KMeans(n_clusters=n_clust, n_init=4, random_state=42)
             labels = km.fit_predict(vecs)
-            rep_texts: list[str] = []
+            reps: list[str] = []
             for cid in range(n_clust):
                 members = np.where(labels == cid)[0].tolist()
                 if not members:
                     continue
                 centroid = km.cluster_centers_[cid]
                 sims = vecs[members] @ centroid / (np.linalg.norm(centroid) or 1.0)
-                best = texts[members[int(np.argmax(sims))]][:120]
-                rep_texts.append(best)
-            return rep_texts
+                reps.append(texts[members[int(np.argmax(sims))]][:250])
+            return reps
 
-        recent_topics = await asyncio.to_thread(_top_topics, recent_chunks)
-        older_topics = await asyncio.to_thread(_top_topics, older_chunks)
-
-        if not recent_topics and not older_topics:
+        recent_reps = await asyncio.to_thread(_cluster_reps, recent_sample)
+        older_reps = await asyncio.to_thread(_cluster_reps, older_sample)
+        if not recent_reps or not older_reps:
             return None
 
-        recent_str = ", ".join(f'"{t}"' for t in recent_topics) or "nothing recent"
-        older_str = ", ".join(f'"{t}"' for t in older_topics) or "nothing earlier"
-        names = ", ".join(sorted(contact_filter))
+        # LLM call 1: label all clusters (both sides) as concrete noun phrases,
+        # persona-builder style. Junk labels are filtered the same way persona
+        # topics are (filter_topic_labels).
+        lines = [f"R{i + 1}: {t}" for i, t in enumerate(recent_reps)]
+        lines += [f"E{i + 1}: {t}" for i, t in enumerate(older_reps)]
+        label_system = (
+            "You receive one representative message per topic cluster from one "
+            "person's texts, split into Recent (R*) and Earlier (E*) clusters. "
+            "Output exactly one line per cluster: its id, a colon, then a "
+            "concrete 2-3 word noun-phrase topic label naming the SUBJECT "
+            "MATTER of the message.\n"
+            "Rules: every label must be a noun phrase. Never output a pronoun, "
+            "a question word, or a bare verb phrase as a label.\n"
+            "Good labels: 'robotics competition', 'college applications', "
+            "'weekend dinner plans'.\n"
+            "No preamble. No extras.\n"
+            "Example:\nR1: weekend plans\nR2: work stress\nE1: family updates"
+        )
+        label_map: dict[str, str] = {}
+        try:
+            resp = await self._openai.chat.completions.create(
+                model=LLM_MODEL,
+                temperature=0.0,
+                max_tokens=200,
+                messages=[
+                    {"role": "system", "content": label_system},
+                    {"role": "user", "content": "\n".join(lines)},
+                ],
+            )
+            for line in (resp.choices[0].message.content or "").splitlines():
+                m = re.match(r"([RE]\d+)\s*:\s*(.+)", line.strip())
+                if m:
+                    label_map[m.group(1)] = m.group(2).strip()
+        except Exception:
+            label_map = {}
+
+        def _labels(prefix: str, reps: list[str]) -> list[str]:
+            # Fall back to a truncated rep text when the LLM missed a cluster.
+            raw = [
+                label_map.get(f"{prefix}{i + 1}") or reps[i][:60]
+                for i in range(len(reps))
+            ]
+            kept = filter_topic_labels([{"topic": lbl} for lbl in raw])
+            return [t["topic"] for t in kept]
+
+        recent_topics = _labels("R", recent_reps)
+        older_topics = _labels("E", older_reps)
+        if not recent_topics or not older_topics:
+            return None
+
+        def _range(side: list[SourceResult]) -> str:
+            # side is newest-first: last element = earliest date.
+            start = (side[-1].date_end or "")[:10] or "?"
+            end = (side[0].date_end or "")[:10] or "?"
+            return f"{start} to {end}"
+
+        names = ", ".join(_display_name(n) for n in sorted(contact_filter))
+        # LLM call 2: compare the two labeled topic lists across date ranges.
         prompt = (
-            f"Recent topics from {names}: [{recent_str}]. "
-            f"Earlier topics: [{older_str}]. "
-            f"In one sentence, describe the shift in what this person talks about. "
-            f"If there's no meaningful shift, say so plainly."
+            f"Topics {names} talked about earlier ({_range(older_sample)}): "
+            f"{', '.join(older_topics)}.\n"
+            f"Topics {names} talks about recently ({_range(recent_sample)}): "
+            f"{', '.join(recent_topics)}.\n\n"
+            f"In ONE sentence, describe how {names}'s focus has shifted between "
+            f"the two periods, naming the concrete topics. If the focus hasn't "
+            f"meaningfully changed, phrase it as \"{names}'s focus has stayed "
+            f"on …\" naming the stable topics — never a bare \"no meaningful "
+            f"shift\". No preamble."
         )
         try:
             resp = await self._openai.chat.completions.create(
                 model=LLM_MODEL,
                 temperature=0.0,
-                max_tokens=100,
+                max_tokens=120,
                 messages=[{"role": "user", "content": prompt}],
             )
             answer = (resp.choices[0].message.content or "").strip()
@@ -740,6 +893,26 @@ class SearchEngine:
             )
             rows = conn.execute(sql, params).fetchall()
         return [r["chunk_id"] for r in rows]
+
+    def _apply_recency_boost(self, fused: list[tuple[str, float]]) -> list[tuple[str, float]]:
+        """Re-sort fused (chunk_id, score) pairs with a mild time-decay boost so
+        recent chunks win ties over equally-similar years-old ones. Chunks with
+        a missing/unparseable date_end keep their raw score (no boost)."""
+        if not fused:
+            return fused
+        chunk_ids = [cid for cid, _ in fused]
+        placeholders = ",".join("?" * len(chunk_ids))
+        with self._open_db() as conn:
+            rows = conn.execute(
+                f"SELECT chunk_id, date_end FROM chunks WHERE chunk_id IN ({placeholders})",
+                chunk_ids,
+            ).fetchall()
+        date_by_id = {r["chunk_id"]: r["date_end"] for r in rows}
+        boosted = [
+            (cid, score * _recency_multiplier(_parse_age_days(date_by_id.get(cid))))
+            for cid, score in fused
+        ]
+        return sorted(boosted, key=lambda x: x[1], reverse=True)
 
     @staticmethod
     def _rrf(*ranked_lists: list[str], k: int = RRF_K) -> list[tuple[str, float]]:
@@ -992,6 +1165,11 @@ class SearchEngine:
             fused = self._rrf(dense_ids, fts_ids, date_ids)
         else:
             fused = self._rrf(dense_ids, fts_ids)
+
+        # Recency-weighted re-rank of the fused scores. Skipped when an explicit
+        # temporal range is in play — the date filter already handles time.
+        if fused and date_filter is None:
+            fused = await asyncio.to_thread(self._apply_recency_boost, fused)
 
         # When contact-filtered, over-hydrate so we have enough material to
         # re-rank by contact-only similarity below; otherwise the top-K cut
