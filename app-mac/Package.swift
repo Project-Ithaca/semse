@@ -8,6 +8,11 @@ let package = Package(
         .executableTarget(
             name: "Memory",
             path: "Sources/Memory"
+        ),
+        .testTarget(
+            name: "MemoryTests",
+            dependencies: ["Memory"],
+            path: "Tests/MemoryTests"
         )
     ]
 )

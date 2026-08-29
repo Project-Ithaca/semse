@@ -12,6 +12,11 @@ struct SearchView: View {
     /// Single selection index across [top quick actions] → [semantic sources]
     /// → [bottom quick actions]. nil = nothing selected.
     @State private var selection: Int?
+    /// Results split by age: anything older than Recency.recentWindowDays sits
+    /// behind the collapsed "Past" row until the user opens it.
+    @State private var recentSources: [SourceResult] = []
+    @State private var pastSources: [SourceResult] = []
+    @State private var showPast = false
     @StateObject private var quick = QuickActionsModel()
 
     @State private var debounceTask: Task<Void, Never>?
@@ -92,6 +97,7 @@ struct SearchView: View {
             // enough — wipe the search so the next open is fresh.
             query = ""
             response = nil
+            clearSources()
             error = nil
             selection = nil
             quick.update(query: "")
@@ -122,14 +128,17 @@ struct SearchView: View {
                 SynthesisCard(answer: answer)
             }
             if let sources = response?.sources, !sources.isEmpty {
-                ForEach(Array(sources.enumerated()), id: \.offset) { idx, src in
-                    let flatIdx = quick.topActions.count + idx
-                    if src.source == "image" {
-                        ImageResultCard(result: src, highlighted: flatIdx == selection)
-                            .onHover { hovering in if hovering { selection = flatIdx } }
-                    } else {
-                        SourceCard(result: src, highlighted: flatIdx == selection)
-                            .onHover { hovering in if hovering { selection = flatIdx } }
+                sourceRows(recentSources, baseIndex: quick.topActions.count)
+                if !pastSources.isEmpty {
+                    PastDisclosureRow(
+                        count: pastSources.count,
+                        expanded: showPast,
+                        highlighted: pastToggleIndex == selection,
+                        onToggle: togglePast
+                    )
+                    .onHover { hovering in if hovering { selection = pastToggleIndex } }
+                    if showPast {
+                        sourceRows(pastSources, baseIndex: pastToggleIndex + 1)
                     }
                 }
             } else if let r = response, r.sources.isEmpty, !loading {
@@ -162,8 +171,39 @@ struct SearchView: View {
         }
     }
 
+    @ViewBuilder
+    private func sourceRows(_ sources: [SourceResult], baseIndex: Int) -> some View {
+        ForEach(Array(sources.enumerated()), id: \.offset) { idx, src in
+            let flatIdx = baseIndex + idx
+            if src.source == "image" {
+                ImageResultCard(result: src, highlighted: flatIdx == selection)
+                    .onHover { hovering in if hovering { selection = flatIdx } }
+            } else {
+                SourceCard(result: src, highlighted: flatIdx == selection)
+                    .onHover { hovering in if hovering { selection = flatIdx } }
+            }
+        }
+    }
+
+    /// Flat selection index of the "Past" row. Only meaningful when
+    /// pastSources is non-empty.
+    private var pastToggleIndex: Int {
+        quick.topActions.count + recentSources.count
+    }
+
+    /// Rows the user can actually select right now — collapsed past results
+    /// are not among them.
     private var sourceCount: Int {
-        response?.sources.count ?? 0
+        guard !pastSources.isEmpty else { return recentSources.count }
+        return recentSources.count + 1 + (showPast ? pastSources.count : 0)
+    }
+
+    private func togglePast() {
+        showPast.toggle()
+        if !showPast, let sel = selection, sel > pastToggleIndex {
+            // Collapsing removed the selected row — fall back to the toggle.
+            selection = pastToggleIndex
+        }
     }
 
     private var hasSemanticContent: Bool {
@@ -210,7 +250,7 @@ struct SearchView: View {
     private func footer(_ r: SearchResponse) -> some View {
         HStack {
             Spacer()
-            Text("\(r.sources.count) source\(r.sources.count == 1 ? "" : "s") · \(r.queryMs)ms")
+            Text("\(footerCount) · \(r.queryMs)ms")
                 .font(.system(size: 10.5))
                 .foregroundColor(Theme.tertiaryText.opacity(0.7))
         }
@@ -225,6 +265,7 @@ struct SearchView: View {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.count < minQueryLength {
             response = nil
+            clearSources()
             error = nil
             loading = false
             currentTask?.cancel()
@@ -246,6 +287,10 @@ struct SearchView: View {
                 if Task.isCancelled { return }
                 await MainActor.run {
                     response = resp
+                    let split = Recency.partition(resp.sources)
+                    recentSources = split.recent
+                    pastSources = split.past
+                    showPast = false
                     loading = false
                 }
             } catch {
@@ -264,6 +309,7 @@ struct SearchView: View {
         if !query.isEmpty || response != nil {
             query = ""
             response = nil
+            clearSources()
             error = nil
             selection = nil
         } else {
@@ -286,7 +332,8 @@ struct SearchView: View {
 
     /// Return activates the selected row; with nothing selected it activates
     /// the first quick action if present. Semantic source rows have no
-    /// default activation. Cmd+Return on a file row reveals it in Finder.
+    /// default activation, except the "Past" row, which expands. Cmd+Return
+    /// on a file row reveals it in Finder.
     private func handleReturn(cmdHeld: Bool) {
         let top = quick.topActions
         let bottom = quick.bottomActions
@@ -296,9 +343,27 @@ struct SearchView: View {
         }
         if sel < top.count {
             activateQuick(top[sel], revealInFinder: cmdHeld)
+        } else if !pastSources.isEmpty, sel == pastToggleIndex {
+            togglePast()
         } else if sel >= top.count + sourceCount, sel - top.count - sourceCount < bottom.count {
             activateQuick(bottom[sel - top.count - sourceCount], revealInFinder: cmdHeld)
         }
+    }
+
+    /// With past results collapsed, a bare total ("8 sources") contradicts a
+    /// panel showing one card — so name both buckets instead.
+    private var footerCount: String {
+        if !pastSources.isEmpty && !showPast {
+            return "\(recentSources.count) recent · \(pastSources.count) past"
+        }
+        let total = recentSources.count + pastSources.count
+        return "\(total) source\(total == 1 ? "" : "s")"
+    }
+
+    private func clearSources() {
+        recentSources = []
+        pastSources = []
+        showPast = false
     }
 
     private func activateQuick(_ action: QuickAction, revealInFinder: Bool) {
