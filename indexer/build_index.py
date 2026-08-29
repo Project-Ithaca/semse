@@ -207,6 +207,59 @@ def _collect_chunks(
             chunks.extend(rc)
         except FileNotFoundError as e:
             print(f"  skipping reminders: {e}", file=sys.stderr)
+    # The four sources below generate random chunk_ids, so incremental runs
+    # must drop already-indexed records BEFORE chunking (cutoff on the record
+    # date) or every --update duplicates them. Notes limitation: an edited
+    # note gets re-indexed as a fresh chunk; the stale chunk remains until a
+    # full rebuild.
+    if "notes" in sources:
+        cutoff = cutoffs.get("notes")
+        print("Parsing Notes…", file=sys.stderr)
+        try:
+            from parse_notes import chunk_notes, iter_notes
+            records = [r for r in iter_notes() if not cutoff or r.date_iso > cutoff]
+            print(f"  {len(records):,} notes", file=sys.stderr)
+            nc = list(chunk_notes(records))
+            print(f"  → {len(nc):,} chunks", file=sys.stderr)
+            chunks.extend(nc)
+        except FileNotFoundError as e:
+            print(f"  skipping notes: {e}", file=sys.stderr)
+    if "whatsapp" in sources:
+        cutoff = cutoffs.get("whatsapp")
+        print("Parsing WhatsApp…", file=sys.stderr)
+        try:
+            from parse_whatsapp import chunk_whatsapp_messages, iter_whatsapp_messages
+            rows = [r for r in iter_whatsapp_messages() if not cutoff or r.date_iso > cutoff]
+            print(f"  {len(rows):,} messages", file=sys.stderr)
+            wc = list(chunk_whatsapp_messages(rows))
+            print(f"  → {len(wc):,} chunks", file=sys.stderr)
+            chunks.extend(wc)
+        except FileNotFoundError as e:
+            print(f"  skipping whatsapp: {e}", file=sys.stderr)
+    if "browsing" in sources:
+        cutoff = cutoffs.get("browsing")
+        print("Parsing browser history…", file=sys.stderr)
+        try:
+            from parse_browser_history import chunk_browser_visits, iter_browser_visits
+            visits = list(iter_browser_visits(since_iso=cutoff))
+            print(f"  {len(visits):,} visits", file=sys.stderr)
+            bc = list(chunk_browser_visits(visits))
+            print(f"  → {len(bc):,} chunks", file=sys.stderr)
+            chunks.extend(bc)
+        except FileNotFoundError as e:
+            print(f"  skipping browsing: {e}", file=sys.stderr)
+    if "calls" in sources:
+        cutoff = cutoffs.get("calls")
+        print("Parsing call history…", file=sys.stderr)
+        try:
+            from parse_callhistory import chunk_calls, iter_calls
+            calls = list(iter_calls(resolver=resolver, since_iso=cutoff))
+            print(f"  {len(calls):,} calls", file=sys.stderr)
+            cc2 = list(chunk_calls(calls))
+            print(f"  → {len(cc2):,} chunks", file=sys.stderr)
+            chunks.extend(cc2)
+        except FileNotFoundError as e:
+            print(f"  skipping calls: {e}", file=sys.stderr)
     return chunks
 
 
@@ -487,7 +540,10 @@ def main() -> None:
         "--sources",
         nargs="+",
         default=["imessage"],
-        choices=["imessage", "mail", "calendar", "reminders", "images"],
+        choices=[
+            "imessage", "mail", "calendar", "reminders", "notes",
+            "whatsapp", "browsing", "calls", "images",
+        ],
         help="Sources to include in this build (images = CLIP image attachments)",
     )
     parser.add_argument(

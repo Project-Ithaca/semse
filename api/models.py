@@ -5,7 +5,10 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-SourceTag = Literal["imessage", "mail", "calendar", "reminders", "hyperspell", "image"]
+SourceTag = Literal[
+    "imessage", "mail", "calendar", "reminders", "notes", "whatsapp",
+    "browsing", "calls", "hyperspell", "image",
+]
 
 
 class QueryIntent(BaseModel):
