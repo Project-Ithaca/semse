@@ -1,5 +1,17 @@
 # TONIGHT.md — Semse Overnight Session
 
+## macOS version requirements
+
+| Part | Requires macOS 26? |
+|---|---|
+| Tasks 1–4 (Python backend, indexer, FastAPI) | ❌ No — any macOS |
+| Task 5 (Swift app, QueryRouter, FoundationModels) | ✅ Yes — write it tonight, friend tests it |
+| Running the full app end-to-end | ✅ Yes |
+
+**If you are not on macOS 26:** Complete Tasks 1–4 fully — the entire Python backend and all new search capabilities are testable on your current Mac. For Task 5, write and commit the Swift changes but do not attempt to build or run. Write what needs testing in `MORNING.md` and let the friend verify on macOS 26.
+
+---
+
 ## How to work
 
 Work through the tasks below **in order**. For each task:
@@ -229,7 +241,7 @@ person has changed over time → "temporal". Default → "standard".
 
 In the backend `api/models.py` `QueryIntent` model, add `query_type: str = "standard"` and have `search.py` prefer this hint over the keyword classifier when present.
 
-**Skip this task if any of Tasks 1-3 are still buggy** — Swift requires a rebuild and is the lowest-leverage piece tonight.
+**Write this regardless of time.** Cannot be compiled or tested below macOS 26 — write it cleanly, commit it, and document any unknowns in `MORNING.md` for the friend tester.
 
 ---
 
@@ -244,6 +256,42 @@ Do **not**:
 - Touch the FAISS index format
 - Delete or recreate `metadata.db` (this would lose the indexed data — `--update` is additive)
 - Add web dependencies (no React Query, SWR, axios, etc.)
+
+## For the friend testing on macOS 26
+
+When testing the Swift app after Tasks 1–5 are committed, the friend needs:
+
+**Setup (one time):**
+```bash
+git clone https://github.com/<org>/semse.git && cd semse
+cd indexer && pip install -r requirements.txt && cd ..
+# Copy their own iMessage DB into the index
+python indexer/build_index.py --sources imessage --summaries --personas
+```
+
+**Run the backend:**
+```bash
+cd api && uvicorn main:app --reload
+```
+
+**Build and run the Swift app:**
+```bash
+cd app-mac
+swift run
+```
+App appears as a menu-bar icon. Press **Ctrl+Option+Space** to open the Spotlight panel.
+
+**What to test:**
+1. Basic search — type any name or topic, verify results appear
+2. Style query — `how does [name] talk` → should return a one-sentence style description, not raw chunks
+3. Affinity query — `what does [name] care about` → should list topics, not a generic answer
+4. Temporal query — `how has [name] changed recently` → should compare recent vs older messages
+5. Cross-contact — `what do [name1] and [name2] both think about [topic]` → comparative answer
+6. QueryRouter hint field — check Console output for `[QueryRouter]` logs, verify `queryType` is being parsed correctly
+
+**File any issues as GitHub issues with the query text, actual output, and expected output.**
+
+---
 
 ## Stop conditions
 
