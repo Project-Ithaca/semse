@@ -91,6 +91,64 @@ def escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+# Conservative deny-list for topic labels: pronouns, question words, and bare
+# common verbs carry no topical content. Kept narrow on purpose — ambiguous
+# noun/verb words ("request", "plans") stay allowed.
+_JUNK_LABEL_DENY = {
+    # pronouns / determiners
+    "i", "me", "my", "mine", "we", "us", "our", "ours", "you", "your",
+    "yours", "he", "him", "his", "she", "her", "hers", "they", "them",
+    "their", "theirs", "it", "its", "this", "that", "these", "those",
+    "someone", "something", "anything", "nothing", "everyone", "everything",
+    # question words
+    "who", "whom", "whose", "what", "which", "when", "where", "why", "how",
+    # bare/auxiliary verbs and common verb forms
+    "is", "are", "was", "were", "am", "be", "been", "being",
+    "do", "does", "did", "done", "have", "has", "had",
+    "say", "says", "said", "saying", "ask", "asks", "asked",
+    "tell", "tells", "told", "talk", "talks", "talked", "talking",
+    "think", "thinks", "thought", "want", "wants", "wanted",
+    "know", "knows", "knew", "get", "gets", "got", "go", "goes",
+    "went", "going", "see", "sees", "saw", "make", "makes", "made",
+    "score", "scored", "can", "could", "will", "would", "should",
+    "may", "might", "must",
+    # filler
+    "yes", "no", "ok", "okay", "yeah", "nah", "lol", "stuff", "thing",
+    "things", "misc", "unknown", "none", "name", "names",
+}
+
+_LABEL_WORD_RE = re.compile(r"[a-z]+")
+
+
+def is_junk_topic_label(label: str) -> bool:
+    """True for labels that carry no topical content: too short, letterless,
+    or made up entirely of pronouns/question-words/bare-verbs."""
+    text = (label or "").strip()
+    if len(text) < 3:
+        return True
+    words = _LABEL_WORD_RE.findall(text.lower())
+    if not words:
+        return True
+    return all(w in _JUNK_LABEL_DENY for w in words)
+
+
+def filter_topic_labels(topics: list[dict]) -> list[dict]:
+    """Drop junk-labeled topics and case-insensitive duplicates, preserving
+    order. Each entry must be a dict with a string 'topic' key."""
+    seen: set[str] = set()
+    out: list[dict] = []
+    for t in topics:
+        label = str(t.get("topic") or "").strip()
+        if is_junk_topic_label(label):
+            continue
+        key = label.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(t)
+    return out
+
+
 @dataclass
 class ContactPersona:
     name: str
@@ -277,9 +335,17 @@ def _cluster_and_label(
                 {
                     "role": "system",
                     "content": (
-                        "You receive one representative message per topic cluster. "
-                        "Output exactly one line per cluster: the cluster number, a colon, "
-                        "then a 2-3 word topic label. No preamble. No extras.\n"
+                        "You receive one representative message per topic cluster from "
+                        "one person's texts. Output exactly one line per cluster: the "
+                        "cluster number, a colon, then a concrete 2-3 word noun-phrase "
+                        "topic label naming the SUBJECT MATTER of the message.\n"
+                        "Rules: every label must be a noun phrase. Never output a "
+                        "pronoun, a question word, or a bare verb phrase as a label.\n"
+                        "Good labels: 'robotics competition', 'college applications', "
+                        "'weekend dinner plans'.\n"
+                        "Bad labels: 'who' (question word, not a subject), "
+                        "'scored them' (verb phrase with no subject).\n"
+                        "No preamble. No extras.\n"
                         "Example:\n1: weekend plans\n2: work stress\n3: family updates"
                     ),
                 },
@@ -304,7 +370,7 @@ def _cluster_and_label(
         top_topics.append({"topic": label, "score": score})
 
     top_topics.sort(key=lambda t: t["score"], reverse=True)
-    top_topics = top_topics[:8]
+    top_topics = filter_topic_labels(top_topics)[:8]
 
     # Style sample: one recent-ish message per cluster (up to 5 clusters).
     style_msgs: list[str] = []

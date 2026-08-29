@@ -1,6 +1,7 @@
 """FastAPI entrypoint."""
 from __future__ import annotations
 
+import asyncio
 import re
 import sys
 from contextlib import asynccontextmanager
@@ -15,25 +16,46 @@ if ENV_PATH.exists():
 load_dotenv()
 
 from .models import SearchRequest, SearchResponse  # noqa: E402
-from .search import SearchEngine  # noqa: E402
+from .search import LLM_MODEL, SearchEngine  # noqa: E402
 
 CONTACTS_DIR = Path(__file__).resolve().parent.parent / "indexer" / "data" / "contacts"
 SAFE_KEY = re.compile(r"^[a-f0-9]{16}$")
 
 engine: SearchEngine | None = None
 engine_error: str | None = None
+_warmup_task: asyncio.Task | None = None
+
+
+async def _warmup(eng: SearchEngine) -> None:
+    """Pre-touch the embedder and the LLM so the first real query doesn't
+    pay the model cold-load cost. Failures are irrelevant — the request
+    path degrades identically."""
+    try:
+        await asyncio.to_thread(eng.embedder.embed_one, "warmup")
+    except Exception:
+        pass
+    try:
+        await eng._openai.chat.completions.create(
+            model=LLM_MODEL,
+            max_tokens=5,
+            messages=[{"role": "user", "content": "ok"}],
+        )
+    except Exception:
+        pass
 
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     # Boot degraded when the index is missing so /health can report why
     # instead of uvicorn aborting on startup.
-    global engine, engine_error
+    global engine, engine_error, _warmup_task
     try:
         engine = SearchEngine()
     except Exception as e:
         engine_error = str(e)
         print(f"[startup] engine init failed: {e}", file=sys.stderr)
+    if engine is not None:
+        _warmup_task = asyncio.create_task(_warmup(engine))
     yield
 
 

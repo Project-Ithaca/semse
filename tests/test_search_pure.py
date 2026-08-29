@@ -1,7 +1,10 @@
 from api.search import (
+    _build_fts_match,
     _classify_query_type,
     _normalize_name,
+    _persona_topics,
     _strip_invented_quote_marks,
+    _strip_query_tokens,
     _validate_no_invented_quotes,
 )
 
@@ -38,6 +41,57 @@ class TestNormalizeName:
     def test_lowercase_and_strip(self):
         assert _normalize_name("Jerry Yan") == _normalize_name("jerry yan")
         assert _normalize_name("O'Brien") == _normalize_name("obrien")
+
+
+class TestBuildFtsMatch:
+    def test_stopwords_and_punctuation_stripped(self):
+        match = _build_fts_match("when is the vex regional competition?")
+        assert match == "vex* OR regional* OR competition*"
+
+    def test_all_stopwords_yields_empty(self):
+        assert _build_fts_match("what is the") == ""
+
+    def test_punctuation_only_yields_empty(self):
+        assert _build_fts_match("?!...") == ""
+
+
+class TestStripQueryTokens:
+    def test_strips_contact_tokens(self):
+        out = _strip_query_tokens("what did ruthvik say about cad", {"ruthvik"})
+        assert out == "what did say about cad"
+
+    def test_case_and_punctuation_insensitive(self):
+        out = _strip_query_tokens("What did Ruthvik, say", {"ruthvik"})
+        assert out == "What did say"
+
+    def test_name_only_query_kept_intact(self):
+        assert _strip_query_tokens("ruthvik", {"ruthvik"}) == "ruthvik"
+
+    def test_no_tokens_no_change(self):
+        q = "what did ruthvik say"
+        assert _strip_query_tokens(q, set()) == q
+
+
+class TestPersonaTopics:
+    def test_junk_labels_filtered_at_read_time(self):
+        import json
+
+        persona = {
+            "top_topics": json.dumps(
+                [
+                    {"topic": "scored them", "score": 0.3},
+                    {"topic": "who", "score": 0.25},
+                    {"topic": "request", "score": 0.2},
+                    {"topic": "uncertainty", "score": 0.15},
+                ]
+            )
+        }
+        topics = [t["topic"] for t in _persona_topics(persona)]
+        assert topics == ["request", "uncertainty"]
+
+    def test_malformed_json_returns_empty(self):
+        assert _persona_topics({"top_topics": "not json"}) == []
+        assert _persona_topics({"top_topics": None}) == []
 
 
 class TestQuoteValidation:

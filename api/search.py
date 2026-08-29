@@ -20,7 +20,7 @@ from .models import ChunkMessage, QueryIntent, SearchRequest, SearchResponse, So
 INDEXER_DIR = Path(__file__).resolve().parent.parent / "indexer"
 sys.path.insert(0, str(INDEXER_DIR))
 from embedder import Embedder  # noqa: E402
-from persona_builder import escape_like  # noqa: E402
+from persona_builder import escape_like, filter_topic_labels  # noqa: E402
 
 DATA_DIR = INDEXER_DIR / "data"
 INDEX_PATH = DATA_DIR / "index.faiss"
@@ -120,16 +120,30 @@ def _normalize_name(name: str) -> str:
     return _NAME_NORM_RE.sub("", name.lower()).strip()
 
 
+def _strip_query_tokens(text: str, tokens: set[str]) -> str:
+    """Remove whitespace-separated words whose normalized form is in `tokens`.
+    Returns the original text when stripping would leave nothing — a query
+    that is ONLY a contact name still needs something to embed."""
+    if not text or not tokens:
+        return text
+    kept = [w for w in text.split() if _normalize_name(w) not in tokens]
+    stripped = " ".join(kept)
+    return stripped if stripped.strip() else text
+
+
 def _persona_topics(persona: dict) -> list[dict]:
     """Parse a persona row's top_topics JSON; malformed rows must not 500 the
-    endpoint, so bad JSON and non-dict/topicless entries are skipped."""
+    endpoint, so bad JSON and non-dict/topicless entries are skipped. Junk
+    labels (pronouns, question words, bare verbs) written by older persona
+    builds are filtered here so they never surface in answers."""
     try:
         raw = json.loads(persona.get("top_topics") or "[]")
     except (TypeError, ValueError):
         return []
     if not isinstance(raw, list):
         return []
-    return [t for t in raw if isinstance(t, dict) and t.get("topic")]
+    valid = [t for t in raw if isinstance(t, dict) and t.get("topic")]
+    return filter_topic_labels(valid)
 
 
 def _filter_for_target_contacts(
@@ -272,6 +286,21 @@ class SearchEngine:
                     if top > 0 and top >= 3 * max(second, 1):
                         out.add(ranked[0])
         return out
+
+    def _contact_name_tokens(self, contact_filter: set[str]) -> set[str]:
+        """Name tokens of the filtered contacts that are DISTINCTIVE — i.e.
+        map to few contacts in the index. Shared surname-like tokens
+        ("robotics" in dozens of contact names) stay out so a query about
+        the robotics TOPIC isn't gutted when a "X Robotics" contact matches."""
+        toks: set[str] = set()
+        for name in contact_filter:
+            for tok in _normalize_name(name).split():
+                if len(tok) < 2:
+                    continue
+                candidates = self._contact_norm_index.get(tok, set())
+                if candidates and len(candidates) <= 4:
+                    toks.add(tok)
+        return toks
 
     def _resolve_contacts(self, extracted: list[str]) -> set[str]:
         """Given LLM-extracted contact strings, return the set of canonical
@@ -871,6 +900,15 @@ class SearchEngine:
                     f"[search] fallback contact extraction added: {sorted(fallback)}",
                     file=sys.stderr,
                 )
+        # A contact name inside the embed text pollutes topic similarity
+        # ("ruthvik cad" drifts toward chunks that merely mention ruthvik).
+        # The contact constraint is enforced by metadata filtering, so the
+        # dense/FTS query should carry only the topical remainder.
+        if contact_filter:
+            embed_query = _strip_query_tokens(
+                embed_query, self._contact_name_tokens(contact_filter)
+            )
+
         # Early-return paths for persona-based query types (style/affinity/temporal).
         # These bypass the full retrieval pipeline when we have richer per-contact
         # data than what FAISS/FTS can surface.
@@ -922,8 +960,11 @@ class SearchEngine:
         run_text = source_filter is None or bool(source_filter - {"image"})
         run_image = source_filter is None or "image" in source_filter
 
-        dense_task = asyncio.create_task(asyncio.to_thread(self._dense_search, embed_query, FUSE_FETCH * (4 if source_filter else 1))) if run_text else None
-        fts_task = asyncio.create_task(asyncio.to_thread(self._fts_search, embed_query, FUSE_FETCH * (4 if source_filter else 1))) if run_text else None
+        # Over-fetch when any post-fetch filter (source OR contact) will drop
+        # candidates, so fusion still has enough survivors to fill top_k.
+        fetch_mult = 4 if (source_filter or contact_filter) else 1
+        dense_task = asyncio.create_task(asyncio.to_thread(self._dense_search, embed_query, FUSE_FETCH * fetch_mult)) if run_text else None
+        fts_task = asyncio.create_task(asyncio.to_thread(self._fts_search, embed_query, FUSE_FETCH * fetch_mult)) if run_text else None
         image_task = asyncio.create_task(asyncio.to_thread(self._image_search, embed_query, max(4, req.top_k))) if run_image else None
         # Skip the remote call entirely (zero network traffic) when no key is set.
         remote_task = (

@@ -1,4 +1,10 @@
-from persona_builder import _compute_style_stats, _emoji_count, escape_like
+from persona_builder import (
+    _compute_style_stats,
+    _emoji_count,
+    escape_like,
+    filter_topic_labels,
+    is_junk_topic_label,
+)
 
 
 def _msgs(*texts):
@@ -30,6 +36,38 @@ class TestStyleStats:
     def test_cjk_contact_low_emoji_freq(self):
         _, freq, _ = _compute_style_stats(_msgs("今天晚上一起吃饭吗", "好的没问题"))
         assert freq == 0
+
+
+class TestJunkTopicLabels:
+    def test_question_words_are_junk(self):
+        assert is_junk_topic_label("who")
+        assert is_junk_topic_label("what")
+
+    def test_verb_phrases_are_junk(self):
+        assert is_junk_topic_label("scored them")
+        assert is_junk_topic_label("did say")
+
+    def test_short_or_letterless_is_junk(self):
+        assert is_junk_topic_label("ok")
+        assert is_junk_topic_label("")
+        assert is_junk_topic_label("123!")
+
+    def test_real_topics_kept(self):
+        assert not is_junk_topic_label("robotics competition")
+        assert not is_junk_topic_label("uncertainty")
+        assert not is_junk_topic_label("request")
+        assert not is_junk_topic_label("weekend plans")
+
+    def test_filter_drops_junk_and_dupes(self):
+        topics = [
+            {"topic": "robotics competition", "score": 0.4},
+            {"topic": "who", "score": 0.3},
+            {"topic": "Robotics Competition", "score": 0.2},
+            {"topic": "scored them", "score": 0.1},
+            {"topic": "college apps", "score": 0.1},
+        ]
+        out = filter_topic_labels(topics)
+        assert [t["topic"] for t in out] == ["robotics competition", "college apps"]
 
 
 class TestEscapeLike:
