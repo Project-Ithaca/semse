@@ -67,15 +67,50 @@ class TemporalRange:
         return a, b
 
 
+# "jonah SAID a couple weeks ago he'd go to the store TOMORROW" — the future
+# word belongs to reported speech, anchored to the message date, not to today.
+_REPORTED_SPEECH_RE = re.compile(
+    r"\b(say|said|says|saying|mention|mentioned|mentions|tell|tells|told|"
+    r"texted|promised|planned|planning|was going to|were going to|would|gonna)\b",
+    re.I,
+)
+
+_TOMORROWISH_RE = re.compile(r"tom{1,2}or{1,2}ow", re.I)
+
+
+def _is_future_ref(kind: str, m: re.Match) -> bool:
+    if kind == "day":
+        return bool(_TOMORROWISH_RE.fullmatch(m.group(1)))
+    if kind == "this_window":
+        return m.group(1).lower() == "next"
+    return False
+
+
 def parse(query: str, now: dt.datetime | None = None) -> tuple[str, TemporalRange | None]:
     """Returns (cleaned_query, range_or_None)."""
     base = now.astimezone() if (now and now.tzinfo) else (now or _local_now())
     if base.tzinfo is None:
         base = base.astimezone()
+    matches: list[tuple[re.Match, str]] = []
     for pattern, kind in TEMPORAL_PATTERNS:
         m = pattern.search(query)
-        if not m:
-            continue
+        if m:
+            matches.append((m, kind))
+    if not matches:
+        return query, None
+    # A past anchor beats a future word: "said a couple weeks ago ... tomorrow"
+    # filters on the couple-weeks window, and "tomorrow" stays in the query as
+    # searchable content (the message likely contains the word itself).
+    past = [(m, k) for m, k in matches if not _is_future_ref(k, m)]
+    if past:
+        chosen = past[0]
+    elif _REPORTED_SPEECH_RE.search(query):
+        # Only future refs, inside reported speech: someone's tomorrow-at-the-
+        # time, not the user's — no date filter at all.
+        return query, None
+    else:
+        chosen = matches[0]
+    for m, kind in [chosen]:
         rng = _interpret(m, kind, base)
         if rng is None:
             continue
