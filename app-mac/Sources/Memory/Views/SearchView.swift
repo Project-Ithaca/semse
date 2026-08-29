@@ -9,7 +9,10 @@ struct SearchView: View {
     @State private var response: SearchResponse?
     @State private var loading = false
     @State private var error: String?
-    @State private var highlightIdx = 0
+    /// Single selection index across [top quick actions] → [semantic sources]
+    /// → [bottom quick actions]. nil = nothing selected.
+    @State private var selection: Int?
+    @StateObject private var quick = QuickActionsModel()
 
     @State private var debounceTask: Task<Void, Never>?
     @State private var currentTask: Task<Void, Never>?
@@ -90,14 +93,22 @@ struct SearchView: View {
             query = ""
             response = nil
             error = nil
+            selection = nil
+            quick.update(query: "")
             currentTask?.cancel()
             debounceTask?.cancel()
         }
-        .background(KeyMonitor(onEsc: handleEsc, onArrow: handleArrow))
+        .background(KeyMonitor(onEsc: handleEsc, onArrow: handleArrow, onReturn: handleReturn))
     }
 
     private var resultsContent: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if !quick.topActions.isEmpty {
+                quickGroup(quick.topActions, baseIndex: 0)
+                if hasSemanticContent {
+                    Divider().background(Theme.dividerLine)
+                }
+            }
             if let err = error {
                 Text(err)
                     .font(.system(size: 12.5))
@@ -112,16 +123,23 @@ struct SearchView: View {
             }
             if let sources = response?.sources, !sources.isEmpty {
                 ForEach(Array(sources.enumerated()), id: \.offset) { idx, src in
+                    let flatIdx = quick.topActions.count + idx
                     if src.source == "image" {
-                        ImageResultCard(result: src, highlighted: idx == highlightIdx)
-                            .onHover { hovering in if hovering { highlightIdx = idx } }
+                        ImageResultCard(result: src, highlighted: flatIdx == selection)
+                            .onHover { hovering in if hovering { selection = flatIdx } }
                     } else {
-                        SourceCard(result: src, highlighted: idx == highlightIdx)
-                            .onHover { hovering in if hovering { highlightIdx = idx } }
+                        SourceCard(result: src, highlighted: flatIdx == selection)
+                            .onHover { hovering in if hovering { selection = flatIdx } }
                     }
                 }
             } else if let r = response, r.sources.isEmpty, !loading {
                 emptyResults
+            }
+            if !quick.bottomActions.isEmpty {
+                if hasSemanticContent || !quick.topActions.isEmpty {
+                    Divider().background(Theme.dividerLine)
+                }
+                quickGroup(quick.bottomActions, baseIndex: quick.topActions.count + sourceCount)
             }
             if let r = response {
                 footer(r)
@@ -129,8 +147,31 @@ struct SearchView: View {
         }
     }
 
-    private var showsBody: Bool {
+    private func quickGroup(_ actions: [QuickAction], baseIndex: Int) -> some View {
+        VStack(spacing: 2) {
+            ForEach(Array(actions.enumerated()), id: \.element.id) { offset, action in
+                let flatIdx = baseIndex + offset
+                QuickActionRow(
+                    action: action,
+                    highlighted: flatIdx == selection,
+                    copied: quick.copiedID == action.id,
+                    onActivate: { activateQuick(action, revealInFinder: false) }
+                )
+                .onHover { hovering in if hovering { selection = flatIdx } }
+            }
+        }
+    }
+
+    private var sourceCount: Int {
+        response?.sources.count ?? 0
+    }
+
+    private var hasSemanticContent: Bool {
         loading || response != nil || error != nil
+    }
+
+    private var showsBody: Bool {
+        hasSemanticContent || !quick.topActions.isEmpty || !quick.bottomActions.isEmpty
     }
 
     private var searchInput: some View {
@@ -150,6 +191,8 @@ struct SearchView: View {
                     .foregroundColor(.white)
                     .focused($focused)
                     .onChange(of: query) { _, newValue in
+                        selection = nil
+                        quick.update(query: newValue)
                         scheduleSearch(for: newValue)
                     }
             }
@@ -204,7 +247,6 @@ struct SearchView: View {
                 await MainActor.run {
                     response = resp
                     loading = false
-                    highlightIdx = 0
                 }
             } catch {
                 if Task.isCancelled { return }
@@ -223,16 +265,45 @@ struct SearchView: View {
             query = ""
             response = nil
             error = nil
+            selection = nil
         } else {
             onDismiss()
         }
     }
 
     private func handleArrow(_ dir: ArrowDirection) {
-        guard let count = response?.sources.count, count > 0 else { return }
+        let total = quick.topActions.count + sourceCount + quick.bottomActions.count
+        guard total > 0 else { selection = nil; return }
         switch dir {
-        case .down: highlightIdx = min(count - 1, highlightIdx + 1)
-        case .up:   highlightIdx = max(0, highlightIdx - 1)
+        case .down:
+            selection = min(total - 1, (selection ?? -1) + 1)
+        case .up:
+            if let sel = selection {
+                selection = sel <= 0 ? nil : sel - 1
+            }
+        }
+    }
+
+    /// Return activates the selected row; with nothing selected it activates
+    /// the first quick action if present. Semantic source rows have no
+    /// default activation. Cmd+Return on a file row reveals it in Finder.
+    private func handleReturn(cmdHeld: Bool) {
+        let top = quick.topActions
+        let bottom = quick.bottomActions
+        guard let sel = selection else {
+            if let first = top.first { activateQuick(first, revealInFinder: cmdHeld) }
+            return
+        }
+        if sel < top.count {
+            activateQuick(top[sel], revealInFinder: cmdHeld)
+        } else if sel >= top.count + sourceCount, sel - top.count - sourceCount < bottom.count {
+            activateQuick(bottom[sel - top.count - sourceCount], revealInFinder: cmdHeld)
+        }
+    }
+
+    private func activateQuick(_ action: QuickAction, revealInFinder: Bool) {
+        if quick.activate(action, revealInFinder: revealInFinder) {
+            onDismiss()
         }
     }
 }
@@ -283,11 +354,13 @@ private struct PanelDragHandle: NSViewRepresentable {
 private struct KeyMonitor: NSViewRepresentable {
     let onEsc: () -> Void
     let onArrow: (ArrowDirection) -> Void
+    let onReturn: (Bool) -> Void
 
     func makeNSView(context: Context) -> NSView {
         let view = MonitorView()
         view.onEsc = onEsc
         view.onArrow = onArrow
+        view.onReturn = onReturn
         return view
     }
 
@@ -296,6 +369,7 @@ private struct KeyMonitor: NSViewRepresentable {
     final class MonitorView: NSView {
         var onEsc: (() -> Void)?
         var onArrow: ((ArrowDirection) -> Void)?
+        var onReturn: ((Bool) -> Void)?
         private var monitor: Any?
 
         override func viewDidMoveToWindow() {
@@ -308,6 +382,9 @@ private struct KeyMonitor: NSViewRepresentable {
                 case 53: self.onEsc?(); return nil          // esc
                 case 125: self.onArrow?(.down); return nil  // arrow down
                 case 126: self.onArrow?(.up); return nil    // arrow up
+                case 36, 76:                                // return / keypad enter
+                    self.onReturn?(event.modifierFlags.contains(.command))
+                    return nil
                 default: return event
                 }
             }
