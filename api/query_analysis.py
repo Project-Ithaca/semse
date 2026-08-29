@@ -101,7 +101,7 @@ _SOURCE_PHRASES: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\b(?:call|called|calls|phone call|facetime)\b", re.I), "calls"),
     (re.compile(r"\b(?:website|websites|browse|browsed|browsing|visited\s+site)\b", re.I), "browsing"),
     (re.compile(r"\b(?:email|emails|mail)\b", re.I), "mail"),
-    (re.compile(r"\b(?:calendar|event|events|meeting|appointment)\b", re.I), "calendar"),
+    (re.compile(r"\b(?:calendar|event|events|meeting|appointment|schedule)\b", re.I), "calendar"),
     (re.compile(r"\breminders?\b|\btodo list\b|\bto-do\b", re.I), "reminders"),
 ]
 

@@ -707,11 +707,12 @@ class SearchEngine:
         with self._open_db() as conn:
             params: list = []
             clauses: list[str] = []
+            # Overlap semantics, matching _hydrate's date filter.
             if after_iso:
-                clauses.append("date_start >= ?")
+                clauses.append("date_end >= ?")
                 params.append(after_iso)
             if before_iso:
-                clauses.append("date_end <= ?")
+                clauses.append("date_start <= ?")
                 params.append(before_iso)
             params.append(k)
             sql = (
@@ -781,9 +782,11 @@ class SearchEngine:
                 continue
             if source_filter is not None and r["source"] not in source_filter:
                 continue
-            if after_iso and (r["date_start"] or "") < after_iso:
+            # Overlap, not containment: a chunk spanning a month (calendar
+            # groups) must survive a one-day window that falls inside it.
+            if after_iso and (r["date_end"] or "") < after_iso:
                 continue
-            if before_iso and (r["date_end"] or "") > before_iso:
+            if before_iso and (r["date_start"] or "9999") > before_iso:
                 continue
             if contact_filter is not None:
                 try:

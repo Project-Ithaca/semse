@@ -35,7 +35,9 @@ def _to_utc(d: dt.datetime) -> dt.datetime:
 
 # Order matters: longer/more-specific patterns first.
 TEMPORAL_PATTERNS = [
-    (re.compile(r"\b(yesterday|today|tomorrow)\b", re.I), "day"),
+    # tom{1,2}or{1,2}ow covers the common misspellings (tommorow, tomorow…) —
+    # typos in the query must not silently drop the date filter.
+    (re.compile(r"\b(yesterday|today|tom{1,2}or{1,2}ow)\b", re.I), "day"),
     (re.compile(r"\bthis (morning|afternoon|evening|night)\b", re.I), "partial_day"),
     (re.compile(r"\b(?:a\s+)?few\s+(days?|weeks?|months?|years?)\s+ago\b", re.I), "few_ago"),
     (re.compile(r"\b(?:a\s+)?couple\s+(?:of\s+)?(days?|weeks?|months?|years?)\s+ago\b", re.I), "few_ago"),
@@ -100,6 +102,8 @@ def _interpret(m: re.Match, kind: str, base: dt.datetime) -> TemporalRange | Non
 
     if kind == "day":
         word = m.group(1).lower()
+        if word not in ("yesterday", "today"):
+            word = "tomorrow"
         offset = {"yesterday": -1, "today": 0, "tomorrow": 1}[word]
         d = (base + dt.timedelta(days=offset)).date()
         after, before = _day_window(d, tz)

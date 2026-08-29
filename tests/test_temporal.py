@@ -29,3 +29,11 @@ def test_in_year():
     assert trange is not None
     start, end = trange.to_iso_range()
     assert start.startswith("2023")
+
+
+def test_tomorrow_misspellings_still_parse():
+    for word in ("tomorrow", "tommorow", "tomorow", "tommorrow"):
+        cleaned, trange = temporal.parse(f"what do i have {word}")
+        assert trange is not None, word
+        assert trange.label == "tomorrow"
+        assert word not in cleaned
