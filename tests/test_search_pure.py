@@ -117,3 +117,25 @@ class TestQuoteValidation:
         )
         assert '"I never want to go"' not in out
         assert "I never want to go" in out
+
+
+class TestInferSources:
+    def test_notes_phrase(self):
+        from api.search import _infer_sources_from_query
+        assert _infer_sources_from_query("what did I write in my notes about robotics") == {"notes"}
+
+    def test_whatsapp(self):
+        from api.search import _infer_sources_from_query
+        assert _infer_sources_from_query("what did we talk about on whatsapp") == {"whatsapp"}
+
+    def test_calls(self):
+        from api.search import _infer_sources_from_query
+        assert _infer_sources_from_query("who did I call last month") == {"calls"}
+
+    def test_no_source_mentioned(self):
+        from api.search import _infer_sources_from_query
+        assert _infer_sources_from_query("what did jerry say about the trip") is None
+
+    def test_bare_notes_word_not_hijacked(self):
+        from api.search import _infer_sources_from_query
+        assert _infer_sources_from_query("did sarah take notes during class") is None

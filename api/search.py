@@ -860,16 +860,30 @@ class SearchEngine:
             ).fetchone()
         return row["path"] if row else None
 
-    def _fts_search(self, query: str, k: int) -> list[str]:
+    def _fts_search(
+        self, query: str, k: int, source_filter: set[str] | None = None
+    ) -> list[str]:
         match = _build_fts_match(query)
         if not match:
             return []
         with self._open_db() as conn:
-            rows = conn.execute(
-                "SELECT chunk_id FROM chunks_fts WHERE chunks_fts MATCH ? "
-                "ORDER BY bm25(chunks_fts) LIMIT ?",
-                (match, k),
-            ).fetchall()
+            if source_filter:
+                # Restrict at query time: a small source (208 notes) never
+                # survives a global top-k against 57k iMessage chunks.
+                placeholders = ",".join("?" * len(source_filter))
+                rows = conn.execute(
+                    "SELECT f.chunk_id FROM chunks_fts f "
+                    "JOIN chunks c ON c.chunk_id = f.chunk_id "
+                    f"WHERE chunks_fts MATCH ? AND c.source IN ({placeholders}) "
+                    "ORDER BY bm25(chunks_fts) LIMIT ?",
+                    (match, *source_filter, k),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT chunk_id FROM chunks_fts WHERE chunks_fts MATCH ? "
+                    "ORDER BY bm25(chunks_fts) LIMIT ?",
+                    (match, k),
+                ).fetchall()
         return [r["chunk_id"] for r in rows]
 
     def _date_search(self, after_iso: str | None, before_iso: str | None, k: int) -> list[str]:
@@ -1054,6 +1068,8 @@ class SearchEngine:
 
         # 3) Translate intent into retrieval-time filters.
         source_filter: set[str] | None = set(intent.sources) if intent.sources else None
+        if source_filter is None:
+            source_filter = _infer_sources_from_query(req.query)
         contact_filter: set[str] | None = None
         if intent.contacts:
             resolved = self._resolve_contacts(intent.contacts)
@@ -1136,8 +1152,12 @@ class SearchEngine:
         # Over-fetch when any post-fetch filter (source OR contact) will drop
         # candidates, so fusion still has enough survivors to fill top_k.
         fetch_mult = 4 if (source_filter or contact_filter) else 1
-        dense_task = asyncio.create_task(asyncio.to_thread(self._dense_search, embed_query, FUSE_FETCH * fetch_mult)) if run_text else None
-        fts_task = asyncio.create_task(asyncio.to_thread(self._fts_search, embed_query, FUSE_FETCH * fetch_mult)) if run_text else None
+        # A source filter needs a much deeper dense pool: the post-fetch
+        # filter throws away every other source, and small sources (a few
+        # hundred chunks) rarely crack a global top-96 in a 68k index.
+        dense_k = FUSE_FETCH * (32 if source_filter else fetch_mult)
+        dense_task = asyncio.create_task(asyncio.to_thread(self._dense_search, embed_query, dense_k)) if run_text else None
+        fts_task = asyncio.create_task(asyncio.to_thread(self._fts_search, embed_query, FUSE_FETCH * fetch_mult, source_filter)) if run_text else None
         image_task = asyncio.create_task(asyncio.to_thread(self._image_search, embed_query, max(4, req.top_k))) if run_image else None
         # Skip the remote call entirely (zero network traffic) when no key is set.
         remote_task = (
@@ -1451,6 +1471,27 @@ _QUESTION_LEAD_WORDS = {
     "should", "will", "would", "tell", "explain", "summarize", "list",
     "show", "find", "any", "which",
 }
+
+
+# Explicit source mentions in the query → hard source filter. Patterns are
+# deliberately phrasal ("my notes", not bare "notes") so ordinary words don't
+# hijack the search.
+_SOURCE_PHRASES: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\b(?:my|in|from)\s+notes?\b|\bnotes? about\b", re.I), "notes"),
+    (re.compile(r"\bwhats\s*app\b|\bwhatsapp\b", re.I), "whatsapp"),
+    (re.compile(r"\b(?:call|called|calls|phone call|facetime)\b", re.I), "calls"),
+    (re.compile(r"\b(?:website|websites|browse|browsed|browsing|visited\s+site)\b", re.I), "browsing"),
+    (re.compile(r"\b(?:email|emails|mail)\b", re.I), "mail"),
+    (re.compile(r"\b(?:calendar|event|events|meeting|appointment)\b", re.I), "calendar"),
+    (re.compile(r"\breminders?\b|\btodo list\b|\bto-do\b", re.I), "reminders"),
+]
+
+
+def _infer_sources_from_query(query: str) -> set[str] | None:
+    """Detect explicit source mentions ("in my notes", "on whatsapp") and
+    return a source filter, or None when the query names no source."""
+    hits = {tag for pat, tag in _SOURCE_PHRASES if pat.search(query)}
+    return hits or None
 
 
 def _looks_like_question(query: str) -> bool:
