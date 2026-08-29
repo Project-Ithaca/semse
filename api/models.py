@@ -24,7 +24,7 @@ class QueryIntent(BaseModel):
 
 class SearchRequest(BaseModel):
     query: str = Field(min_length=1)
-    top_k: int = 8
+    top_k: int = Field(8, ge=1, le=50)
     intent: QueryIntent | None = None
 
 
@@ -41,8 +41,8 @@ class ChunkMessage(BaseModel):
 class SourceResult(BaseModel):
     source: SourceTag | str
     contact_names: list[str]
-    date_start: str
-    date_end: str
+    date_start: str = ""
+    date_end: str = ""
     score: float
     messages: list[ChunkMessage] = []
     subject: str | None = None

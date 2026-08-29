@@ -19,6 +19,8 @@ from datetime import timezone
 
 import dateparser
 
+MAX_AGO_DAYS = 365 * 200  # sanity cap for "N units ago"
+
 
 def _local_now() -> dt.datetime:
     """Wall-clock time in the user's local timezone."""
@@ -147,6 +149,8 @@ def _interpret(m: re.Match, kind: str, base: dt.datetime) -> TemporalRange | Non
         n = int(m.group(1))
         unit = m.group(2).lower().rstrip("s")
         unit_days = {"day": 1, "week": 7, "month": 30, "year": 365}.get(unit, 1)
+        # Clamp: unbounded N ("99999999 years ago") overflows timedelta.
+        n = min(n, MAX_AGO_DAYS // unit_days)
         d = base - dt.timedelta(days=unit_days * n)
         # Window of width = unit, centered on the target day.
         return TemporalRange(
@@ -215,7 +219,8 @@ def _interpret(m: re.Match, kind: str, base: dt.datetime) -> TemporalRange | Non
                              matched_text=text, label=f"{month_name} {year}")
 
     if kind == "year":
-        y = int(m.group(1))
+        # Clamp so datetime(y + 1, ...) can't exceed datetime.MAXYEAR.
+        y = min(max(int(m.group(1)), dt.MINYEAR), dt.MAXYEAR - 1)
         return TemporalRange(
             after=_to_utc(dt.datetime(y, 1, 1, tzinfo=tz)),
             before=_to_utc(dt.datetime(y + 1, 1, 1, tzinfo=tz)),

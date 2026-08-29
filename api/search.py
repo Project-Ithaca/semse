@@ -28,7 +28,10 @@ ID_MAP_PATH = DATA_DIR / "id_map.json"
 IMAGE_INDEX_PATH = DATA_DIR / "images.faiss"
 IMAGE_ID_MAP_PATH = DATA_DIR / "image_id_map.json"
 
-OPENAI_MODEL = "gpt-4o-mini"
+# Local OpenAI-compatible server (Ollama) by default — same pattern as
+# indexer/persona_builder.py.
+LLM_BASE_URL = os.getenv("SEMSE_LLM_BASE_URL", "http://localhost:11434/v1")
+LLM_MODEL = os.getenv("SEMSE_LLM_MODEL", "qwen2.5:7b")
 
 # Strict prompt: model must return empty string when excerpts don't address the query.
 SYSTEM_PROMPT = """You are a personal memory search assistant.
@@ -96,6 +99,10 @@ FUSE_FETCH = 24  # how many candidates each retriever pulls before fusion
 # Strip punctuation for pattern matching in _classify_query_type.
 _STRIP_PUNC = re.compile(r"[^\w\s]")
 
+# Chars stripped when checking whether an answer has any substance left
+# after invented quotes are removed. Includes curly quotes.
+_ANSWER_STRIP_CHARS = " .,;:!?\"'“”‘’()[]"
+
 _QUERY_TOKEN_RE = re.compile(r"[A-Za-z0-9]{2,}")
 _NAME_NORM_RE = re.compile(r"[^a-z0-9 ]+")
 
@@ -110,6 +117,18 @@ def _normalize_name(name: str) -> str:
     if not name:
         return ""
     return _NAME_NORM_RE.sub("", name.lower()).strip()
+
+
+def _persona_topics(persona: dict) -> list[dict]:
+    """Parse a persona row's top_topics JSON; malformed rows must not 500 the
+    endpoint, so bad JSON and non-dict/topicless entries are skipped."""
+    try:
+        raw = json.loads(persona.get("top_topics") or "[]")
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(raw, list):
+        return []
+    return [t for t in raw if isinstance(t, dict) and t.get("topic")]
 
 
 def _filter_for_target_contacts(
@@ -173,7 +192,9 @@ class SearchEngine:
         self.id_map: list[str] = json.loads(ID_MAP_PATH.read_text())
         self.embedder = Embedder()
         self._db_path = str(META_DB_PATH)
-        self._openai = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        self._openai = AsyncOpenAI(
+            base_url=LLM_BASE_URL, api_key=os.getenv("OPENAI_API_KEY") or "ollama"
+        )
         # Image index is optional — if it doesn't exist, image search is skipped.
         self.image_index = None
         self.image_id_map: list[int] = []
@@ -305,16 +326,20 @@ class SearchEngine:
     ) -> list[SourceResult]:
         """Fetch the most recent chunks where any target contact appears.
         Optionally filtered to chunks before `before_iso`."""
+        if not contact_filter:
+            return []
         like_args = [f'%{json.dumps(n)[1:-1]}%' for n in contact_filter]
         conditions = " OR ".join("contact_names LIKE ?" for _ in like_args)
+        params: list = list(like_args)
         extra = ""
         if before_iso:
-            extra = f" AND date_end < '{before_iso}'"
+            extra = " AND date_end < ?"
+            params.append(before_iso)
         with self._open_db() as conn:
             rows = conn.execute(
                 f"SELECT * FROM chunks WHERE ({conditions}){extra} "
                 f"ORDER BY date_end DESC LIMIT ?",
-                like_args + [limit],
+                params + [limit],
             ).fetchall()
         out: list[SourceResult] = []
         for r in rows:
@@ -323,8 +348,8 @@ class SearchEngine:
                 SourceResult(
                     source=r["source"],
                     contact_names=json.loads(r["contact_names"]),
-                    date_start=r["date_start"],
-                    date_end=r["date_end"],
+                    date_start=r["date_start"] or "",
+                    date_end=r["date_end"] or "",
                     score=0.5,
                     messages=messages,
                     subject=r["subject"],
@@ -348,10 +373,13 @@ class SearchEngine:
 
         parts: list[str] = []
         for p in personas:
-            topics_raw = json.loads(p.get("top_topics") or "[]")
-            top4 = " · ".join(t["topic"] for t in topics_raw[:4])
+            topics = _persona_topics(p)
+            top4 = " · ".join(t["topic"] for t in topics[:4])
             style_sum = p.get("style_summary") or f"{p['name']} communicates concisely."
-            parts.append(f"{style_sum}\n\nThey mainly talk about: {top4}.")
+            if top4:
+                parts.append(f"{style_sum}\n\nThey mainly talk about: {top4}.")
+            else:
+                parts.append(style_sum)
         answer = "\n\n".join(parts)
 
         # Fetch 3 recent chunks as supporting sources.
@@ -376,12 +404,12 @@ class SearchEngine:
         answer_parts: list[str] = []
         for p in personas:
             name = p["name"]
-            topics_raw = json.loads(p.get("top_topics") or "[]")
-            if not topics_raw:
+            topics = [t for t in _persona_topics(p) if isinstance(t.get("score"), (int, float))]
+            if not topics:
                 continue
             topic_list = ", ".join(
                 f"{t['topic']} ({round(t['score'] * 100):.0f}%)"
-                for t in topics_raw[:6]
+                for t in topics[:6]
             )
             prompt = (
                 f"Rewrite this as one natural sentence about what someone talks about most:\n"
@@ -389,7 +417,7 @@ class SearchEngine:
             )
             try:
                 resp = await self._openai.chat.completions.create(
-                    model=OPENAI_MODEL,
+                    model=LLM_MODEL,
                     temperature=0.0,
                     max_tokens=80,
                     messages=[{"role": "user", "content": prompt}],
@@ -436,7 +464,9 @@ class SearchEngine:
             texts = [t for t in texts if t and len(t) > 10]
             if len(texts) < k:
                 return texts[:k]
-            vecs = self.embedder.embed_batch(texts).astype("float32")
+            vecs = self.embedder.embed_batch(
+                texts, show_progress_bar=False
+            ).astype("float32")
             n_clust = min(k, len(texts))
             km = KMeans(n_clusters=n_clust, n_init=4, random_state=42)
             labels = km.fit_predict(vecs)
@@ -468,7 +498,7 @@ class SearchEngine:
         )
         try:
             resp = await self._openai.chat.completions.create(
-                model=OPENAI_MODEL,
+                model=LLM_MODEL,
                 temperature=0.0,
                 max_tokens=100,
                 messages=[{"role": "user", "content": prompt}],
@@ -541,7 +571,7 @@ class SearchEngine:
         context = "\n\n".join(blocks)
         try:
             resp = await self._openai.chat.completions.create(
-                model=OPENAI_MODEL,
+                model=LLM_MODEL,
                 temperature=0.0,
                 max_tokens=200,
                 messages=[
@@ -557,7 +587,7 @@ class SearchEngine:
         ok, bad = _validate_no_invented_quotes(answer, context)
         if not ok:
             answer = _strip_invented_quote_marks(answer, context)
-            if not answer.strip(" .,;:!?\"'""''()[]"):
+            if not answer.strip(_ANSWER_STRIP_CHARS):
                 return None
         return SearchResponse(
             answer=answer,
@@ -729,8 +759,8 @@ class SearchEngine:
                 SourceResult(
                     source=r["source"],
                     contact_names=json.loads(r["contact_names"]),
-                    date_start=r["date_start"],
-                    date_end=r["date_end"],
+                    date_start=r["date_start"] or "",
+                    date_end=r["date_end"] or "",
                     score=float(score),
                     messages=messages,
                     subject=r["subject"],
@@ -772,7 +802,9 @@ class SearchEngine:
             return sources[:top_k]
         valid_texts = [contact_texts[i] for i in non_empty_idx]
         query_vec = self.embedder.embed_one(query).astype("float32")
-        text_vecs = self.embedder.embed_batch(valid_texts).astype("float32")
+        text_vecs = self.embedder.embed_batch(
+            valid_texts, show_progress_bar=False
+        ).astype("float32")
         scores: list[float] = [-1.0] * len(sources)
         for vi, src_i in enumerate(non_empty_idx):
             scores[src_i] = float(np.dot(query_vec, text_vecs[vi]))
@@ -788,7 +820,8 @@ class SearchEngine:
             print(
                 f"[search] query=\"{req.query}\" intent: topic=\"{intent.topic}\" "
                 f"sources={intent.sources} contacts={intent.contacts} "
-                f"attachment={intent.must_have_attachment}",
+                f"attachment={intent.must_have_attachment} "
+                f"query_type={intent.query_type}",
                 file=sys.stderr,
             )
 
@@ -822,23 +855,13 @@ class SearchEngine:
                     f"[search] fallback contact extraction added: {sorted(fallback)}",
                     file=sys.stderr,
                 )
-        # Task 3: Cross-contact comparison — two+ contacts + "both"/"vs"/"and"/"compare".
-        if (
-            contact_filter is not None
-            and len(contact_filter) >= 2
-            and re.search(r"\b(both|and|vs|versus|compare)\b", req.query, re.I)
-        ):
-            result = await self._synthesize_compare(
-                req.query, contact_filter, embed_query, req.top_k, t0
-            )
-            if result is not None:
-                return result
-
         # Early-return paths for persona-based query types (style/affinity/temporal).
         # These bypass the full retrieval pipeline when we have richer per-contact
         # data than what FAISS/FTS can surface.
         # Prefer the on-device hint from QueryRouter when available (non-default),
         # fall back to keyword classifier. This avoids an extra round-trip cost.
+        # Runs BEFORE the compare gate so "how do alex and sam talk" routes to
+        # style, not compare.
         if intent and intent.query_type and intent.query_type != "standard":
             query_type = intent.query_type
         else:
@@ -859,6 +882,20 @@ class SearchEngine:
                 )
             # result is None → persona data not available, fall through to standard pipeline.
 
+        # Task 3: Cross-contact comparison — two+ contacts + "both"/"vs"/"compare".
+        # Bare "and" is deliberately NOT a trigger — it would hijack any
+        # two-contact query containing the word.
+        if (
+            contact_filter is not None
+            and len(contact_filter) >= 2
+            and re.search(r"\b(both|vs|versus|compare)\b", req.query, re.I)
+        ):
+            result = await self._synthesize_compare(
+                req.query, contact_filter, embed_query, req.top_k, t0
+            )
+            if result is not None:
+                return result
+
         # If the user explicitly asked for an image, treat image as the only
         # relevant source — text excerpts about a photo aren't what they want.
         if intent.must_have_attachment:
@@ -872,7 +909,12 @@ class SearchEngine:
         dense_task = asyncio.create_task(asyncio.to_thread(self._dense_search, embed_query, FUSE_FETCH * (4 if source_filter else 1))) if run_text else None
         fts_task = asyncio.create_task(asyncio.to_thread(self._fts_search, embed_query, FUSE_FETCH * (4 if source_filter else 1))) if run_text else None
         image_task = asyncio.create_task(asyncio.to_thread(self._image_search, embed_query, max(4, req.top_k))) if run_image else None
-        remote_task = asyncio.create_task(hyperspell.search(req.query, top_k=req.top_k))
+        # Skip the remote call entirely (zero network traffic) when no key is set.
+        remote_task = (
+            asyncio.create_task(hyperspell.search(req.query, top_k=req.top_k))
+            if os.getenv("HYPERSPELL_API_KEY")
+            else None
+        )
         date_task = None
         if date_filter and run_text:
             after_iso, before_iso = date_filter
@@ -988,7 +1030,9 @@ class SearchEngine:
         consistently leaked user opinions back as the contact's. The simpler
         the input, the safer the output.
         """
-        if not sources or not os.getenv("OPENAI_API_KEY"):
+        # No API-key gate: the default LLM is a local keyless server, and every
+        # call site degrades to "" on connection errors.
+        if not sources:
             return ""
         if not _looks_like_question(query):
             return ""
@@ -1051,7 +1095,7 @@ class SearchEngine:
             )
         try:
             resp = await self._openai.chat.completions.create(
-                model=OPENAI_MODEL,
+                model=LLM_MODEL,
                 temperature=0.0,
                 max_tokens=300,
                 messages=[
@@ -1132,7 +1176,7 @@ class SearchEngine:
         )
         try:
             resp = await self._openai.chat.completions.create(
-                model=OPENAI_MODEL,
+                model=LLM_MODEL,
                 temperature=0.0,
                 max_tokens=300,
                 messages=[
@@ -1159,7 +1203,7 @@ class SearchEngine:
                 answer = _strip_invented_quote_marks(answer, context)
                 # If after stripping the answer is empty or only punctuation,
                 # there was nothing of substance beyond the fake quote.
-                if not answer.strip(" .,;:!?\"'“”‘’()[]"):
+                if not answer.strip(_ANSWER_STRIP_CHARS):
                     return ""
             return answer
         except Exception:
@@ -1205,8 +1249,10 @@ def _classify_query_type(query: str, has_contact: bool) -> str:
         return "style"
     if "like to talk to" in q or "like to text" in q:
         return "style"
-    # "what's X like" / "what is X like" at end of query
-    if re.search(r"what(?:'s| is)\s+\w[\w\s]+\blike\b\s*$", q):
+    # "what's X like" / "what is X like" at end of query. _STRIP_PUNC has
+    # already replaced the apostrophe with a space ("what's" → "what s"),
+    # so match the stripped forms, never the apostrophe one.
+    if re.search(r"what(?:s|\s+s|\s+is)\s+\w[\w\s]*\blike\b\s*$", q):
         return "style"
 
     # Affinity: what topics / interests / things they care about

@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import re
+import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Response
-from fastapi.middleware.cors import CORSMiddleware
 
 ENV_PATH = Path(__file__).parent / ".env"
 if ENV_PATH.exists():
@@ -16,36 +17,44 @@ load_dotenv()
 from .models import SearchRequest, SearchResponse  # noqa: E402
 from .search import SearchEngine  # noqa: E402
 
-app = FastAPI(title="Semantic Memory Search")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # localhost-only API; native client doesn't enforce origin
-    allow_methods=["POST", "GET", "OPTIONS"],
-    allow_headers=["*"],
-)
-
 CONTACTS_DIR = Path(__file__).resolve().parent.parent / "indexer" / "data" / "contacts"
 SAFE_KEY = re.compile(r"^[a-f0-9]{16}$")
 
 engine: SearchEngine | None = None
+engine_error: str | None = None
 
 
-@app.on_event("startup")
-def _load_engine() -> None:
-    global engine
-    engine = SearchEngine()
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    # Boot degraded when the index is missing so /health can report why
+    # instead of uvicorn aborting on startup.
+    global engine, engine_error
+    try:
+        engine = SearchEngine()
+    except Exception as e:
+        engine_error = str(e)
+        print(f"[startup] engine init failed: {e}", file=sys.stderr)
+    yield
+
+
+app = FastAPI(title="Semantic Memory Search", lifespan=_lifespan)
+
+
+def _engine_unavailable_reason() -> str:
+    return engine_error or "Search engine not initialized"
 
 
 @app.get("/health")
 def health() -> dict:
-    return {"ok": engine is not None}
+    if engine is None:
+        return {"ok": False, "error": _engine_unavailable_reason()}
+    return {"ok": True}
 
 
 @app.post("/search", response_model=SearchResponse)
 async def search(req: SearchRequest) -> SearchResponse:
     if engine is None:
-        raise HTTPException(503, "Search engine not initialized")
+        raise HTTPException(503, _engine_unavailable_reason())
     return await engine.search(req)
 
 
@@ -53,7 +62,7 @@ async def search(req: SearchRequest) -> SearchResponse:
 def attachment(att_id: int) -> Response:
     """Serve an iMessage image attachment by its rowid."""
     if engine is None:
-        raise HTTPException(503, "engine not ready")
+        raise HTTPException(503, _engine_unavailable_reason())
     path = engine.get_image_path(att_id)
     if not path:
         raise HTTPException(404, "not found")
