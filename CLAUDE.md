@@ -105,3 +105,5 @@ cd app-mac && swift run   # menu-bar icon; Ctrl+Option+Space opens the panel
 # Tests
 .venv/bin/python -m pytest tests/ -q
 ```
+
+@AGENTS.md
