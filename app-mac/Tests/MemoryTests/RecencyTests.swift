@@ -95,7 +95,7 @@ final class RecencyPartitionTests: XCTestCase {
             makeSource(dateStart: iso(daysAgo: 30), dateEnd: iso(daysAgo: 30), snippet: "b"),
             makeSource(dateStart: iso(daysAgo: 5), dateEnd: iso(daysAgo: 5), snippet: "c"),
         ]
-        let split = Recency.partition(sources, now: now)
+        let split = Recency.partition(sources, now: now, alwaysVisible: 0)
         XCTAssertEqual(split.recent.map(\.snippet), ["a", "c"])
         XCTAssertEqual(split.past.map(\.snippet), ["b"])
     }
@@ -107,7 +107,7 @@ final class RecencyPartitionTests: XCTestCase {
             makeSource(dateStart: iso(daysAgo: 500), dateEnd: iso(daysAgo: 500), snippet: "old2"),
             makeSource(dateStart: iso(daysAgo: 3), dateEnd: iso(daysAgo: 3), snippet: "new2"),
         ]
-        let split = Recency.partition(sources, now: now)
+        let split = Recency.partition(sources, now: now, alwaysVisible: 0)
         XCTAssertEqual(split.recent.map(\.snippet), ["new1", "new2"])
         XCTAssertEqual(split.past.map(\.snippet), ["old1", "old2"])
     }
@@ -117,23 +117,23 @@ final class RecencyPartitionTests: XCTestCase {
         let spanning = makeSource(
             source: "calendar", dateStart: iso(daysAgo: 40), dateEnd: iso(daysAgo: 3)
         )
-        let split = Recency.partition([spanning], now: now)
+        let split = Recency.partition([spanning], now: now, alwaysVisible: 0)
         XCTAssertEqual(split.recent.count, 1)
         XCTAssertTrue(split.past.isEmpty)
     }
 
     func testFallsBackToStartWhenEndMissing() {
         let noEnd = makeSource(dateStart: iso(daysAgo: 200), dateEnd: "")
-        XCTAssertEqual(Recency.partition([noEnd], now: now).past.count, 1)
+        XCTAssertEqual(Recency.partition([noEnd], now: now, alwaysVisible: 0).past.count, 1)
     }
 
     func testUndatedResultStaysVisible() {
         let undated = makeSource(dateStart: "", dateEnd: "")
-        XCTAssertEqual(Recency.partition([undated], now: now).recent.count, 1)
+        XCTAssertEqual(Recency.partition([undated], now: now, alwaysVisible: 0).recent.count, 1)
     }
 
     func testEmptyInput() {
-        let split = Recency.partition([], now: now)
+        let split = Recency.partition([], now: now, alwaysVisible: 0)
         XCTAssertTrue(split.recent.isEmpty)
         XCTAssertTrue(split.past.isEmpty)
     }
@@ -142,8 +142,46 @@ final class RecencyPartitionTests: XCTestCase {
         let sources = (0..<3).map {
             makeSource(dateStart: iso(daysAgo: Double(30 + $0)), dateEnd: iso(daysAgo: Double(30 + $0)))
         }
-        let split = Recency.partition(sources, now: now)
+        let split = Recency.partition(sources, now: now, alwaysVisible: 0)
         XCTAssertTrue(split.recent.isEmpty)
         XCTAssertEqual(split.past.count, 3)
+    }
+}
+
+/// The top results stay on screen regardless of age; only the tail collapses.
+final class RecencyPinningTests: XCTestCase {
+    private func allOld(_ count: Int) -> [SourceResult] {
+        (0..<count).map {
+            makeSource(dateStart: iso(daysAgo: Double(100 + $0)),
+                       dateEnd: iso(daysAgo: Double(100 + $0)),
+                       snippet: "s\($0)")
+        }
+    }
+
+    func testTopThreeSurviveEvenWhenAllAreOld() {
+        let split = Recency.partition(allOld(8), now: now)
+        XCTAssertEqual(split.recent.map(\.snippet), ["s0", "s1", "s2"])
+        XCTAssertEqual(split.past.map(\.snippet), ["s3", "s4", "s5", "s6", "s7"])
+    }
+
+    func testFewerResultsThanPinCountLeavesNothingPast() {
+        let split = Recency.partition(allOld(2), now: now)
+        XCTAssertEqual(split.recent.count, 2)
+        XCTAssertTrue(split.past.isEmpty)
+    }
+
+    func testRecentResultsPastThePinStillShow() {
+        var sources = allOld(3)
+        sources.append(makeSource(dateStart: iso(daysAgo: 1), dateEnd: iso(daysAgo: 1),
+                                  snippet: "fresh"))
+        sources.append(makeSource(dateStart: iso(daysAgo: 300), dateEnd: iso(daysAgo: 300),
+                                  snippet: "ancient"))
+        let split = Recency.partition(sources, now: now)
+        XCTAssertEqual(split.recent.map(\.snippet), ["s0", "s1", "s2", "fresh"])
+        XCTAssertEqual(split.past.map(\.snippet), ["ancient"])
+    }
+
+    func testDefaultPinCountIsThree() {
+        XCTAssertEqual(Recency.alwaysVisibleCount, 3)
     }
 }

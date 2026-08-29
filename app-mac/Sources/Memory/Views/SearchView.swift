@@ -354,7 +354,7 @@ struct SearchView: View {
     /// panel showing one card — so name both buckets instead.
     private var footerCount: String {
         if !pastSources.isEmpty && !showPast {
-            return "\(recentSources.count) recent · \(pastSources.count) past"
+            return "\(recentSources.count) shown · \(pastSources.count) past"
         }
         let total = recentSources.count + pastSources.count
         return "\(total) source\(total == 1 ? "" : "s")"

@@ -5,6 +5,10 @@ import Foundation
 /// user clicks to reveal.
 enum Recency {
     static let recentWindowDays = 14
+    /// The best-ranked results always stay on screen no matter their age —
+    /// most queries in a years-deep index have nothing from the last two
+    /// weeks, and a panel showing only a "Past" row reads as broken.
+    static let alwaysVisibleCount = 3
 
     private static let utcCalendar: Calendar = {
         var cal = Calendar(identifier: .gregorian)
@@ -55,14 +59,18 @@ enum Recency {
     /// Partitions results by recency, preserving relevance order within each
     /// bucket. A result is dated by `dateEnd` — its newest moment — so a chunk
     /// that spans months counts as recent when it ran into the last two weeks.
+    /// The first `alwaysVisible` results are pinned to the visible bucket
+    /// whatever their age.
     static func partition(
-        _ sources: [SourceResult], now: Date = Date()
+        _ sources: [SourceResult],
+        now: Date = Date(),
+        alwaysVisible: Int = alwaysVisibleCount
     ) -> (recent: [SourceResult], past: [SourceResult]) {
         var recent: [SourceResult] = []
         var past: [SourceResult] = []
-        for source in sources {
+        for (idx, source) in sources.enumerated() {
             let stamp = source.dateEnd.isEmpty ? source.dateStart : source.dateEnd
-            if isRecent(stamp, now: now) {
+            if idx < alwaysVisible || isRecent(stamp, now: now) {
                 recent.append(source)
             } else {
                 past.append(source)
