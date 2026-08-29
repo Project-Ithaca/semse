@@ -28,14 +28,15 @@ ollama serve   # keep running (or: brew services start ollama)
 # 3. Build the index (~20-30 min first time)
 .venv/bin/python indexer/build_index.py --sources imessage mail --summaries --personas
 
-# 4. Run the backend
-.venv/bin/uvicorn api.main:app --port 8000
-
-# 5. Run the app
-cd app-mac && swift run
+# 4. Build the app once
+cd app-mac && swift build -c release && cd ..
 ```
 
-The app lives in the menu bar — press **Ctrl+Option+Space** to search.
+## Run it
+
+Double-click **`scripts/start_semse.command`** (drag it to your Dock for one-click access).
+It starts the local LLM, the API, and the menu-bar app — then press **Ctrl+Option+Space** to search.
+`scripts/stop_semse.command` shuts everything down.
 
 Nightly index refresh: add `scripts/update_index.sh` to cron (see the comment in the script).
 
