@@ -81,6 +81,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return true
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        BackendLauncher.stopLaunchedProcesses()
+    }
+
     private func handleContentHeightChanged(_ height: CGFloat) {
         guard let panel = spotlightPanel else { return }
         guard height > 1 else { return }  // ignore the no-content reading

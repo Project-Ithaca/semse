@@ -18,11 +18,30 @@ enum BackendLauncher {
         return URL(fileURLWithPath: path)
     }
 
+    // Only processes this app spawned; a stack the user started by hand is
+    // left alone on quit.
+    private static let launchedLock = NSLock()
+    private static var launched: [Process] = []
+
     static func ensureStackRunning() {
         Task.detached(priority: .utility) {
             async let llm: Void = ensureOllama()
             async let api: Void = ensureAPI()
             _ = await (llm, api)
+        }
+    }
+
+    static func stopLaunchedProcesses() {
+        launchedLock.lock()
+        let processes = launched
+        launched = []
+        launchedLock.unlock()
+        for process in processes where process.isRunning {
+            log("stopping \(process.executableURL?.lastPathComponent ?? "process") (pid \(process.processIdentifier))")
+            process.terminate()
+        }
+        for process in processes {
+            process.waitUntilExit()
         }
     }
 
@@ -123,6 +142,9 @@ enum BackendLauncher {
         }
         do {
             try process.run()
+            launchedLock.lock()
+            launched.append(process)
+            launchedLock.unlock()
         } catch {
             log("failed to launch \(executable.lastPathComponent): \(error.localizedDescription)")
         }
