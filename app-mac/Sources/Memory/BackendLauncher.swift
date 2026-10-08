@@ -145,8 +145,31 @@ enum BackendLauncher {
             launchedLock.lock()
             launched.append(process)
             launchedLock.unlock()
+            startWatchdog(for: process)
         } catch {
             log("failed to launch \(executable.lastPathComponent): \(error.localizedDescription)")
+        }
+    }
+
+    /// applicationWillTerminate never runs on a crash or Force Quit, so a tiny
+    /// shell loop outlives the app and kills the child once our pid is gone.
+    private static func startWatchdog(for child: Process) {
+        let watchdog = Process()
+        watchdog.executableURL = URL(fileURLWithPath: "/bin/sh")
+        watchdog.arguments = [
+            "-c",
+            "while kill -0 \"$1\" 2>/dev/null && kill -0 \"$2\" 2>/dev/null; do sleep 2; done; kill \"$2\" 2>/dev/null",
+            "semse-watchdog",
+            String(ProcessInfo.processInfo.processIdentifier),
+            String(child.processIdentifier),
+        ]
+        watchdog.standardInput = FileHandle.nullDevice
+        watchdog.standardOutput = FileHandle.nullDevice
+        watchdog.standardError = FileHandle.nullDevice
+        do {
+            try watchdog.run()
+        } catch {
+            log("failed to start watchdog: \(error.localizedDescription)")
         }
     }
 
